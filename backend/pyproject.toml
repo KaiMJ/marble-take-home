@@ -1,0 +1,17 @@
+[project]
+name = "lantern-ops"
+version = "0.1.0"
+description = "Operations agent for Lantern Yard Kitchen"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "litellm>=1.106.2",
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/marble", "src/ai", "src/memory", "src/api", "src/config.py"]
