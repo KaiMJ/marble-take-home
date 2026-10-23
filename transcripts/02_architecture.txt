@@ -1,0 +1,588 @@
+ ▐▛███▛█   Claude Code v2.1.309
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Work/Marble_Founding_Engineer_Take_Home
+
+
+❯ based on the README, I have created a high level architecture.md .            
+                                                                                
+  I want to refine / see if I'm missing anything.                               
+
+  Listed 2 directories (ctrl+o to expand)
+
+⏺ I compared ARCHITECTURE.md with the README and the deliverable spec. The
+  direction is sound: SQLite, plain Python plus LiteLLM, terminal output. The
+  big gap is that the spec asks mainly for how memory works, and the draft says
+  very little about it. Below is what's missing, in priority order.
+
+  1. Memory design is underspecified (the core ask)
+
+  The spec wants to know what is kept, how changing facts are represented, and
+  what gets forgotten or invalidated. Right now the draft has "sqlite +
+  context.json + version logs".
+
+  - Two stores is a problem. SQLite plus a free-form context.json means two
+    sources of truth. I'd drop the JSON file and use one append-only facts
+    table:
+    fact_id, subject, attribute, value, unit, source_id (N09/INV-010-L01), 
+    effective_from, recorded_at, status, supersedes_fact_id, author
+  - Keep two dates per fact: when it takes effect (effective_from) and when it
+    was recorded (recorded_at). That's what answers "what did we believe on
+    Friday?" and covers rule 4 (future-dated facts).
+  - Write the 4 conflict rules into the doc as a resolver that runs in code, not
+    inside the LLM prompt.
+  - Add an open_questions table (M99 recipe, INV-099) with a resolution link.
+    Demo 3 depends on it.
+  - "Forgotten" means status changes: superseded or retracted, and nothing is
+    deleted. Say that outright, because it's a direct question in the spec.
+
+  2. Separate code that computes from the LLM that talks
+
+  This layer is missing entirely, and it's what makes "reproducible" and "never
+  invents numbers" true:
+  CSVs + notes → deterministic reconciliation/runway (pure Python) → facts + 
+  findings (with IDs)
+              → LLM: extract notes → candidate facts / rank + narrate findings
+              → validator: every number & ID in output must exist in computed 
+  results
+  Turning the temperature down doesn't make results reproducible. Doing the
+  numbers in code does.
+
+  3. Some nodes contradict the README guardrails
+
+  - Intervention Node "send message": the README says never contact vendors.
+    Narrow it to drafting an action for a human to approve.
+  - Function Node "forecast": the README says runway, not forecasting. Rename
+    it.
+  - Tool "modify": the README says GM edits are just new notes. Make it add_note
+    only. Modifying or deleting would break the audit trail.
+  - An agentic node fills context.json: an LLM writing memory with no checks is
+    your riskiest component. Extracted facts need a cited source span and should
+    land as asserted/unverified until checked.
+
+  4. Missing sections
+
+  - What you left out and why. The spec requires this. You can reuse the
+    README's out-of-scope list.
+  - How the brief is ranked. Give the formula, for example: deadline proximity
+    (Tue noon cutoff) × dollar or stockout impact × whether it blocks other
+    work.
+  - Tools list. Something like get_reconciliation(item), get_runway(item),
+    query_facts(subject, as_of), add_note(text), list_open_questions().
+
+  5. Production failures are too generic
+
+  "Integration, capability, eval scalability" are true of any system. The spec
+  asks for likely failures of this one:
+  - Note extraction gets a unit wrong (20 lb vs. 40 lb cases), so runway is
+    silently wrong.
+  - The LLM states a number nobody computed, or cites an ID that doesn't exist.
+  - The count is wrong. Garbage in still reconciles neatly (closing chicken
+    count).
+  - Conflicting notes with the same timestamp or an ambiguous author.
+  - Stale reference data with no note to override it, so nothing flags it.
+  - Too many alerts. Maya ignores the brief if items 6–15 are noise.
+  - Timezone or effective-date off-by-one errors (Sep 28 price, noon cutoff).
+
+  6. Testing section is missing (about half a page)
+
+  - Golden tests on the data packet: INV-010 shows about $378 over, chicken
+    shows about 48 lb, rice/beans/oil/avocado/eggs reconcile exactly.
+  - The 4 demo scenarios as eval cases with expected facts and statuses.
+  - Citation coverage: every number in the brief traces to a row or note ID
+    (automated check).
+  - As-of replay: rebuild memory as of Oct 1 and check the beliefs.
+  - Adversarial notes: an ambiguous unit, a retraction of a retraction.
+  - Usefulness: did Maya act on the top 3 items, the false-alarm rate, and
+    whether Theo can read his section in under a minute.
+
+  Small fixes
+
+  - Delete the first bullet. It's the assignment prompt pasted in.
+  - Remove the stray --> markers or replace them with one layer diagram.
+  - Trigger Node: a daily 6 a.m. brief run is enough. Event triggers can be
+    "future work".
+
+  Want me to rewrite ARCHITECTURE.md along these lines?
+
+✻ Sautéed for 33s · done 12:15 PM
+
+❯ 1) I think I want to keep one flexible JSONB schema, instead of all the       
+  variables. but metadata like effective_from, recorded_at, author, should be   
+  added. Yes, conflict rules is going to be in python. Open questions not sure  
+  if it neecds to be a separate table. I think categories of flexible tables    
+  should be facts, open_questions, rules. I added in context.json for short     
+  term, and sqlite for long term. Forgotten can be represented as a variable    
+  like version / status.                                                        
+                                                                                
+  2) sure I was impling this layer during the implementation of the agentic     
+  nodes.                                                                        
+                                                                                
+  3)- I meant 'send message' = 'human approval / verification required'         
+  - modify and context.json internally should be append_only, but query checks  
+  the latest approved versions by default.                                      
+                                                                                
+  4) sure. priority is somewhat defined in the readme.                          
+  5) ok make sense.                                                             
+  6) that's more data specific that I can add later. right now i'm focused on   
+  the architecture.                                                             
+                                                                                
+  small fixes: sure.                                                            
+
+⏺ Write(ARCHITECTURE.md)
+  ⎿  Added 146 lines, removed 28 lines
+        1  # Architecture
+        2  
+        3 -- **A short `ARCHITECTURE.md`** explaining your choices, what 
+          -you left out, and how memory works: what is retained, how chan
+          -ging facts are represented, and what is forgotten or invalidat
+          -ed. Include roughly half a page on likely production failures 
+          -and how you would test whether the system is useful and trustw
+          -orthy.                                                        
+        3 +## Overview                                                   
+        4  
+        5 +```                                                           
+        6 +data/*.csv + GM_OPS_LOG.md                                    
+        7 +        │                                                     
+        8 +        ▼                                                     
+        9 +Integration ── load CSVs as-is (no unified schema yet)        
+       10 +        │                                                     
+       11 +        ▼                                                     
+       12 +Function Nodes (pure Python) ── reconciliation, runway, rules,
+          + alerts                                                       
+       13 +        │                         deterministic, every figure 
+          +carries row/note IDs                                          
+       14 +        ▼                                                     
+       15 +Memory (SQLite long-term, context.json short-term)            
+       16 +        │   facts · open_questions · rules   (append-only, ver
+          +sioned)                                                       
+       17 +        ▼                                                     
+       18 +Reasoning Node (LLM) ── parse notes → candidate facts, rank + 
+          +narrate findings                                              
+       19 +        │                 never computes numbers; only cites t
+          +hem                                                           
+       20 +        ▼                                                     
+       21 +Intervention Node ── human approval / verification required   
+       22 +        │                                                     
+       23 +        ▼                                                     
+       24 +Terminal UI ── morning brief, Q&A, memory state               
+       25 +```                                                           
+       26  
+        6 -Integration Layer                                             
+        7 -- skip unifying schemas and use the provided csv as hardcoded 
+          -variables for now.                                            
+       27 +Trigger Node runs the pipeline daily (6 a.m. brief) or on a ne
+          +w note.                                                       
+       28 +Every step is logged. Stack: Python + LiteLLM, no agent framew
+          +ork.                                                          
+       29  
+        9 --->                                                           
+       30 +## Key decisions                                              
+       31  
+       11 -Database / Memory                                             
+       12 -- sqlite (keep it simple.)                                    
+       13 -- context.json (per site / user / notes, flexible schemas)    
+       14 -- Pydantic layer + migration files for initializing data/*.csv
+          -. context.json will be filled in by an Agentic Node.          
+       15 -- Maintain everything (we have enough storage), but also track
+          - version change logs (high priority stays most recent) so we c
+          -an undo decisions. Will most likely trigger new validation che
+          -cks / conflicting data.                                       
+       32 +- **Numbers come from code, words come from the LLM.** Reconci
+          +liation and runway                                            
+       33 +  are pure Python, so the same inputs always produce the same 
+          +figures. The LLM                                              
+       34 +  explains and ranks them but cannot introduce a number that i
+          +sn't in a tool result.                                        
+       35 +- **No schema unification yet.** The CSVs are loaded directly.
+          + A unified integration                                        
+       36 +  layer is the first thing to build for a second site or vendo
+          +r.                                                            
+       37 +- **Agent recommends, humans act.** No orders and no vendor co
+          +ntact. Any action                                             
+       38 +  that leaves the system goes through the Intervention Node fo
+          +r human approval.                                             
+       39 +- **Conflict rules live in Python**, not in prompts, so they a
+          +re testable and                                               
+       40 +  consistent (see Memory).                                    
+       41  
+       17 --->                                                           
+       42 +## Memory                                                     
+       43  
+       19 -CLI / SDK / MCP / Tools                                       
+       20 -- edit (add / modify)                                         
+       21 -- search (query / filter / extract)                           
+       22 -- Python tool functions registration, skip tool_search for now
+          -, allow for flexible queries.                                 
+       44 +### Storage                                                   
+       45  
+       24 --->                                                           
+       46 +| Layer | Store | Purpose |                                   
+       47 +| --- | --- | --- |                                           
+       48 +| Short-term | `context.json` | Working context for the curren
+          +t run/session: site, user, recent notes, in-flight reasoning |
+       49 +| Long-term | SQLite | Durable, versioned record of facts, ope
+          +n questions, and rules |                                      
+       50  
+       26 -Agentic Nodes                                                 
+       51 +Long-term memory has three tables. Each one uses the same enve
+          +lope: fixed metadata                                          
+       52 +columns plus a flexible JSONB `body`.                         
+       53  
+       28 -- Reasoning Node (verification, parsing, reasoning)           
+       29 -- Function Nodes (forecast / rules / alerts / actions API)    
+       30 -- Intervention Node (confirm, send message)                   
+       31 -- Trigger Node (If XYZ happens, every 1 day ....)             
+       32 -- log each steps / processes. LiteLLM + python barebone is goo
+          -d enough.                                                     
+       54 +```                                                           
+       55 +id, version, status, effective_from, recorded_at, author, sour
+          +ce_ids, supersedes, body (JSONB)                              
+       56 +```                                                           
+       57  
+       34 --->                                                           
+       58 +- **facts**: what we believe (for example: chicken price $3.65
+          +/lb from Sep 28,                                              
+       59 +  source N03 and INV-013).                                    
+       60 +- **open_questions**: what we don't know yet (M99 recipe missi
+          +ng, INV-099 arrival).                                         
+       61 +  They stay on the brief until a fact resolves them.          
+       62 +- **rules**: business rules and conventions (for example: Alde
+          +r cutoff is noon the                                          
+       63 +  day before delivery, counting conventions).                 
+       64  
+       36 -UI / UX                                                       
+       37 -- just terminal output for now.                               
+       65 +The flexible `body` lets new kinds of facts in without migrati
+          +ons. The fixed                                                
+       66 +metadata columns keep querying, ordering, and conflict resolut
+          +ion uniform.                                                  
+       67 +Pydantic models validate each `body` type at write time. Migra
+          +tion files seed                                               
+       68 +SQLite from `data/*.csv`.                                     
+       69  
+       70 +### Retained vs. forgotten                                    
+       71  
+       40 -Likely Production failures                                    
+       41 -- Integration Scalability: Integration layer can get complex  
+       42 -- Capability Scalability: new customer features may require ne
+          -w agentic nodes                                               
+       43 -- Evaluation Scalability: Need verification / validation nodes
+          - to check tone / alignment / accuracy.                        
+       72   No newline at end of file
+       73 +- **Everything is retained.** Writes are append-only, so an ed
+          +it creates a new                                              
+       74 +  version and never overwrites the old one.                   
+       75 +- **"Forgotten" is a status**, not a delete: `asserted`, `veri
+          +fied`, `unverified`,                                          
+       76 +  `superseded`, `retracted`.                                  
+       77 +- **Queries return the latest approved version by default.** A
+          +n `as_of` parameter                                           
+       78 +  replays past beliefs ("what did we believe on Friday?").    
+       79 +- **GM edits are new notes.** They go through the same path as
+          + any other source.                                            
+       80 +                                                              
+       81 +### Conflict rules (Python resolver)                          
+       82 +                                                              
+       83 +1. A newer note from the person who checked beats an older one
+          + (N14 retracts N13).                                          
+       84 +2. A physical check beats an office entry (N15 beats INV-099's
+          + "received").                                                 
+       85 +3. A dated note beats a stale reference sheet (N09 beats `vend
+          +ors.csv`).                                                    
+       86 +4. A future-dated fact applies only from its `effective_from` 
+          +(N03).                                                        
+       87 +                                                              
+       88 +When a new version arrives, the resolver re-runs the affected 
+          +validation checks.                                            
+       89 +That can close open questions or open new ones.               
+       90 +                                                              
+       91 +### LLM writes                                                
+       92 +                                                              
+       93 +The Reasoning Node can propose facts parsed from notes, but ea
+          +ch proposal must                                              
+       94 +cite a source ID. It lands as `asserted` or `unverified` and b
+          +ecomes `verified`                                             
+       95 +only after a rule check or human approval.                    
+       96 +                                                              
+       97 +## Tools (CLI / SDK / MCP)                                    
+       98 +                                                              
+       99 +Tools are plain Python functions registered with the LLM. Ther
+          +e is no tool search                                           
+      100 +yet; queries are flexible filters over the shared envelope.   
+      101 +                                                              
+      102 +- **search**: query, filter, or extract across facts, open_que
+          +stions, and rules,                                            
+      103 +  with `as_of` and status filters.                            
+      104 +- **edit**: append a new version (add or modify). Never an in-
+          +place update.                                                 
+      105 +- **compute**: reconciliation and runway per ingredient.      
+      106 +                                                              
+      107 +## Agentic nodes                                              
+      108 +                                                              
+      109 +| Node | Role |                                               
+      110 +| --- | --- |                                                 
+      111 +| Reasoning | Parse notes, verify against facts, rank and narr
+          +ate findings |                                                
+      112 +| Function | Reconciliation, runway, rules, alerts, action dra
+          +fting |                                                       
+      113 +| Intervention | Human approval / verification gate before any
+          + action is accepted |                                         
+      114 +| Trigger | Schedule (daily brief) and events (new note → re-r
+          +esolve, re-brief) |                                           
+      115 +                                                              
+      116 +The brief is ranked as described in the README: deadline proxi
+          +mity (the order                                               
+      117 +cutoff), dollar or stockout impact, and whether the item block
+          +s other numbers.                                              
+      118 +                                                              
+      119 +## UI                                                         
+      120 +                                                              
+      121 +Terminal only. It shows the brief, takes questions, and shows 
+          +memory state                                                  
+      122 +(versions and statuses).                                      
+      123 +                                                              
+      124 +## Left out (and why)                                         
+      125 +                                                              
+      126 +- **Unified integration schema:** not needed for a single site
+          +'s CSVs.                                                      
+      127 +- **Forecasting and vendor switching:** three weeks of data is
+          + too thin. We                                                 
+      128 +  compute runway only.                                        
+      129 +- **Inferring the M99 recipe:** confounded with unweighed wast
+          +e (N06). We ask                                               
+      130 +  instead of guessing.                                        
+      131 +- **Per-user briefs, notifications, and a frontend:** these ca
+          +n be built on top of                                          
+      132 +  the memory layer later.                                     
+      133 +- **Tool search:** the tool count is small enough to register 
+          +them all.                                                     
+      134 +                                                              
+      135 +## Likely production failures                                 
+      136 +                                                              
+      137 +- **Bad extraction:** a misread unit (20 lb vs. 40 lb case) si
+          +lently corrupts                                               
+      138 +  runway. Mitigation: require a source span and keep the fact 
+          +`unverified`                                                  
+      139 +  until checked.                                              
+      140 +- **Hallucinated numbers or IDs:** the LLM states a figure no 
+          +tool returned.                                                
+      141 +  Mitigation: an output validator checks every number and ID a
+          +gainst tool results.                                          
+      142 +- **Garbage counts:** a wrong count still reconciles neatly. C
+          +ount reliability                                              
+      143 +  has to be its own fact.                                     
+      144 +- **Ambiguous conflicts:** same-timestamp notes or an unclear 
+          +author. The resolver                                          
+      145 +  falls back to opening an open_question instead of picking a 
+          +winner.                                                       
+      146 +- **Stale reference data with no overriding note:** nothing fl
+          +ags it.                                                       
+      147 +  Mitigation: age-based staleness rules.                      
+      148 +- **Date bugs:** timezone or `effective_from` off-by-one error
+          +s (Sep 28 price,                                              
+      149 +  noon cutoff).                                               
+      150 +- **Alert fatigue:** a long, noisy brief gets ignored. Cap the
+          + brief and rank hard.                                         
+      151 +- **Short-term/long-term drift:** `context.json` diverges from
+          + SQLite. SQLite is                                            
+      152 +  the source of truth; context.json is rebuilt from it on ever
+          +y run.                                                        
+      153 +- **Scalability:** the integration layer, new capabilities nee
+          +ding new nodes, and                                           
+      154 +  evaluation all grow with each customer.                     
+      155 +                                                              
+      156 +## Testing (outline)                                          
+      157 +                                                              
+      158 +- Golden tests: reconciliation and runway outputs on the data 
+          +packet.                                                       
+      159 +- The demo scenarios from the README as end-to-end eval cases.
+      160 +- Citation coverage: every claim in the brief traces to an ID.
+      161 +- As-of replay of memory.                                     
+      162 +- Usefulness: whether the GM acts on the top items, and the fa
+          +lse-alarm rate.                                               
+
+⏺ I rewrote ARCHITECTURE.md with your decisions:
+
+  - Storage: one flexible JSONB body per row, plus fixed metadata columns
+    (version, status, effective_from, recorded_at, author, source_ids, 
+    supersedes). The same envelope is used for facts, open_questions and rules.
+  - Short-term vs. long-term: context.json holds short-term memory and SQLite
+    holds long-term. Both are append-only, and queries return the latest
+    approved version by default, with as_of to look at past beliefs. "Forgotten"
+    is a status or version change, never a delete.
+  - Conflict rules: in Python, and they re-run validation checks when a new
+    version arrives.
+  - Intervention Node: now described as the human approval / verification gate.
+  - Code computes, LLM explains: the layer you planned to build inside the
+    agentic nodes is shown in the overview diagram.
+  - Small fixes and new sections: removed the pasted prompt and the --> markers.
+    Added "Left out", specific production failures, and a short testing outline
+    you can fill in later.
+
+  Point to check: I wrote that SQLite is the source of truth and context.json is
+  rebuilt from it on every run. Otherwise the two stores can drift apart. If
+  you intended context.json to hold things SQLite doesn't have, that line needs
+  changing.
+
+✻ Churned for 34s · done 12:25 PM
+
+❯ /export                                                                       
+  ⎿  Conversation exported to: /Users/kaimkim/Work/Marble_Founding_Engineer_Take
+     _Home/transcripts/02_architecture.txt
+
+※ recap: I'm refining ARCHITECTURE.md for the Lantern Yard Kitchen ops agent, and it's now rewritten with your memory design, guardrails, failure modes and a testing outline. Next, confirm that SQLite is the source of truth and context.json gets rebuilt from it each run. (disable recaps in /config)
+
+❯ I have mocked up the file structure at the bottom of the architecture.md.     
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The structure is mostly there. The biggest problem is that the deterministic
+  core, reconciliation and runway, has no home, even though the architecture
+  says "numbers come from code." The gaps:
+
+  1. No place for the Function nodes. Reconciliation, runway, rules and alerts
+     are pure Python, so they shouldn't live under ai/ or memory/. Add domain/
+     (or engine/).
+  2. memory/tools/ mixes concerns. Tools also cover compute, not just memory
+     search and edit. Move the registrations to one place, such as ai/tools/,
+     where each tool wraps either memory or domain.
+  3. Seeding has no home. The CSV migrations need memory/migrations/ (or seed/).
+  4. Some nodes aren't placed. The Trigger node (scheduler) and Intervention
+     node (approval queue) are missing. agents/*_node might cover them, but say
+     so.
+  5. marble/ is vague. It's unclear whether it's config or code, and it sits
+     outside src/. I'd split it: marble/prompts/ and marble/rules/ as data,
+     while flows and checks stay as code in ai/. The output validator (number/ID
+     checker) also needs a named home, for example ai/checks/.
+  6. Runtime files have no location. Neither context.json nor the step logs has
+     a place. Add var/ (or runtime/) and keep it out of git.
+  7. No tests/ directory. The golden tests and demo-scenario evals need one.
+  8. api/ vs. main.py. If the UI is terminal-only, either drop api/ or say it's
+     what main.py calls.
+
+  Suggested layout:
+
+  backend/
+    src/
+      domain/          # pure Python: reconciliation, runway, rules, alerts, 
+  ranking
+      memory/
+        db/            # sqlite access, append-only writes, as_of queries
+        schemas/       # pydantic envelope + body types
+        resolver.py    # conflict rules
+        migrations/    # seed from data/*.csv
+      ai/
+        runtime/       # litellm wrapper, step logging
+        nodes/         # reasoning, intervention, trigger
+        tools/         # registrations → memory / domain
+        checks/        # output validator (numbers/IDs cited)
+      api/             # thin interface used by main.py
+    marble/            # prompts, flow configs, rule definitions (data, not 
+  code)
+    tests/             # golden + scenario evals
+    var/               # context.json, logs (gitignored)
+    main.py            # terminal UI
+  data/                # provided packet (read-only)
+
+  Want me to update the File Structure section with this?
+
+✻ Cooked for 14s · done 12:38 PM
+
+❯ i was thinking marble/ should contain the domain instead.                     
+
+⏺ That works. marble/ becomes the business-logic package (what Marble knows
+  about restaurants), and ai/ and memory/ are the infrastructure underneath it.
+  One rule keeps it clean: the deterministic math inside marble/ must not import
+  from ai/. That way reconciliation stays pure and testable, and the LLM only
+  reaches it through tools.
+
+  backend/
+    src/
+      marble/              # domain: what Marble knows about restaurant ops
+        reconciliation.py  # opening + purchases − closing vs recipe × sold
+        runway.py
+        rules/             # conflict rules, alert rules, staleness checks
+        ranking.py         # brief priority
+        prompts/           # system prompts, brief template
+        flows/             # morning_brief, ask, ingest_note
+      ai/
+        runtime/           # litellm, step logging
+        nodes/             # reasoning, intervention, trigger
+        tools/             # registrations → marble / memory
+        checks/            # output validator (numbers/IDs cited)
+      memory/
+        db/  schemas/  migrations/
+      api/
+    tests/
+    var/                   # context.json, logs (gitignored)
+    main.py
+
+  Pure code (math and rules) sits next to prompts and flows. That's fine for
+  now. If marble/ gets big, split it into marble/core/ (pure) and marble/agent/
+  (prompts and flows).
+
+  Should I write this into the File Structure section?
+
+✻ Sautéed for 7s · done 12:39 PM
+
+❯ yes                                                                           
+
+⏺ Bash(python3 - <<'EOF'
+      p='ARCHITECTURE.md'…)
+  ⎿  data/                    # provided packet (read-only)
+     ```
+     … +3 lines (ctrl+o to expand)
+  ⎿  Updated ARCHITECTURE.md (+28 -12)
+      164  
+      165  ## File Structure
+      166  
+      167 -backend/src/                                                  
+      168 -- api/                                                        
+      169 -- ai/                                                         
+      170 -    - agents/*_node (reasoning, ...)                          
+      171 -    - agents_runtime/ (core litellm)                          
+      172 -- memory/                                                     
+      173 -    - db/                                                     
+      174 -    - tools/                                                  
+      175 -    - schemas/                                                
+      176 -marble/ (defined system prompts, flows, checks, tool registrat
+          -ions)                                                         
+      177 -                                                              
+      178 -main.py (frontend for now)                                    
+      167 +```                                                           
+      168 +backend/                                                      
+      169 +  src/                                                        
+      170 +    marble/              # domain: what Marble knows about res
+          +taurant ops                                                   
+      171 +      reconciliation.py  # opening + purchases − closing vs re
+          +cipe × sold                                                   
+      172 +      runway.py                                               
+      173 +      rules/             # conflict rules, alert rules, stalen
+          +ess checks                                                    
+      174 +      ranking.py         # brief priority                     
+      175 +      prompts/           # system prompts, brief template     
+      176 +      flows/             # morning_brief, ask, ingest_note    
+      177 +    ai/                                                       
+      178 +      runtime/           # litellm wrapper, step logging      
+      179 +      nodes/             # reasoning, intervention, trigger   
+      180 +      tools/             # registrations → marble / memory    
+      181 +      checks/            # output validator (numbers/IDs cited
+          +)                                                             
+      182 +    memory/                                                   
+      183 +      db/                # sqlite access, append-only writes, 
+          +as_of queries                                                 
+      184 +      schemas/           # pydantic envelope + body types     
+      185 +      migrations/        # seed from data/*.csv               
+      186 +    api/                 # thin interface used by main.py     
+      187 +  tests/                 # golden + scenario evals            
+      188 +  var/                   # context.json, logs (gitignored)    
+      189 +  main.py                # terminal UI                        
+      190 +data/                    # provided packet (read-only)        
+      191 +```                                                           
+     … 3 more lines (ctrl+o to expand)
+
+⏺ I replaced the File Structure section in ARCHITECTURE.md with the new layout.
+  marble/ is now the domain package, and I added a closing note stating the rule
+  that its deterministic code never imports from ai/.
+
+✻ Cooked for 8s · done 12:39 PM
