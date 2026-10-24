@@ -60,7 +60,7 @@ def run(code: str, notes_until: str | None) -> dict:
     if notes_until:
         ns["notes"] = ns["notes"][ns["notes"].written_at <= notes_until].reset_index(drop=True)
     out = io.StringIO()
-    result, error = None, None
+    result = error = None
     try:
         tree = ast.parse(code)
         last = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None

@@ -20,7 +20,8 @@ MEMORY_DIR = VAR_DIR / "memories"
 RUNS_DIR = VAR_DIR / "runs"
 
 # Snapshot time from the packet; the agent treats this as "now".
-NOW = "Monday 2026-10-05 06:00 America/New_York"
+NOW_ISO = "2026-10-05 06:00"
+NOW = f"Monday {NOW_ISO} America/New_York"
 PERIOD_START = date(2026, 9, 14)
 PERIOD_END = date(2026, 10, 4)
 

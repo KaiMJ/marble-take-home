@@ -2,14 +2,13 @@
 
 import json
 import select
-import sqlite3
 import subprocess
 import sys
 
 import pandas as pd
 
 import config
-from db import ID_COLUMNS
+import db
 
 TIMEOUT_S = 30
 MAX_OUTPUT = 8000
@@ -48,6 +47,9 @@ TABLE_DESCRIPTIONS = {
 }
 
 
+# Reply fields in display order, with the tag each is wrapped in.
+REPLY_TAGS = [("stdout", "stdout"), ("result", "result"), ("gaps", "note"), ("empty", "note"), ("error", "error")]
+
 class Workspace:
     def __init__(self, notes_until: str | None = None) -> None:
         self.proc: subprocess.Popen | None = None
@@ -72,17 +74,7 @@ class Workspace:
             self.close()
             return f"<error>Timed out after {TIMEOUT_S}s. Session restarted; variables were lost.</error>"
         reply = json.loads(self.proc.stdout.readline())
-        parts = []
-        if reply["stdout"]:
-            parts.append(f"<stdout>{reply['stdout']}</stdout>")
-        if reply["result"] is not None:
-            parts.append(f"<result>{reply['result']}</result>")
-        if reply.get("gaps"):
-            parts.append(f"<note>{reply['gaps']}</note>")
-        if reply.get("empty"):
-            parts.append(f"<note>{reply['empty']}</note>")
-        if reply["error"]:
-            parts.append(f"<error>{reply['error']}</error>")
+        parts = [f"<{tag}>{reply[key]}</{tag}>" for key, tag in REPLY_TAGS if reply.get(key)]
         text = "\n".join(parts) or "<stdout></stdout>"
         if len(text) > MAX_OUTPUT:
             text = text[:MAX_OUTPUT] + f"\n[truncated: {len(text) - MAX_OUTPUT} more chars]"
@@ -96,8 +88,8 @@ class Workspace:
 
 def manifest() -> str:
     lines = ["WORKSPACE (python tool): these DataFrames are preloaded."]
-    with sqlite3.connect(config.DB_PATH) as con:
-        for table in ID_COLUMNS:
+    with db.connect() as con:
+        for table in db.ID_COLUMNS:
             df = pd.read_sql_query(f"SELECT * FROM {table}", con)
             cols = ", ".join(f"{c} {_dtype(df[c])}" for c in df.columns)
             lines.append(f"\n{table} ({len(df)} rows): {TABLE_DESCRIPTIONS[table]}")

@@ -1,0 +1,1031 @@
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Work/Marble_Founding_Engineer_Take_Home/backend
+
+
+❯ I want to perform a codebase refactor with clean, best pracitce standards.    
+  current python implementations are too verbose                                
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Small codebase (~1.3k lines). Read all first.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+⏺ I have a full picture now—the code's fairly tight already, so improvements
+  will focus on structural cleanups like duplicated logic, if/elif dispatch, and
+  repeated boilerplate. Since no tests exist, I'll back up the runtime data and
+  capture baseline snapshots (DB, snapshot, manifest, gaps) to verify behavior
+  stays unchanged.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Baseline captured. Now refactor. Start with db.py (shared connection helpers)
+  and config.py:
+
+⏺ Bash(python3 - <<'EOF'
+      import re…)
+  ⎿  checks.py:67:    with sqlite3.connect(config.DB_PATH) as con:
+     checks.py:118:    with sqlite3.connect(config.DB_PATH) as con:
+     db.py:41:        return sqlite3.connect(f"file:{config.DB_PATH}?mode=r
+     … +7 lines (ctrl+o to expand)
+  ⎿  Updated config.py (+2 -1)
+      20  RUNS_DIR = VAR_DIR / "runs"
+      21  
+      22  # Snapshot time from the packet; the agent treats this as "now"
+          .
+      23 -NOW = "Monday 2026-10-05 06:00 America/New_York"               
+      23 +NOW_ISO = "2026-10-05 06:00"                                   
+      24 +NOW = f"Monday {NOW_ISO} America/New_York"                     
+      25  PERIOD_START = date(2026, 9, 14)
+      26  PERIOD_END = date(2026, 10, 4)
+      27  
+  ⎿  Updated db.py (+12 -3)
+      36  }
+      37  
+      38  
+      39 +def connect(read_only: bool = False) -> sqlite3.Connection:    
+      40 +    if read_only:                                              
+      41 +        return sqlite3.connect(f"file:{config.DB_PATH}?mode=ro"
+         +, uri=True)                                                    
+      42 +    return sqlite3.connect(config.DB_PATH)                     
+      43 +                                                               
+      44 +def query(sql: str, params: tuple = ()) -> pd.DataFrame:       
+      45 +    with connect() as con:                                     
+      46 +        return pd.read_sql_query(sql, con, params=params)      
+      47 +                                                               
+      48  def _week(d: pd.Series) -> pd.Series:
+      49      return (pd.to_datetime(d) - pd.Timestamp(config.PERIOD_STAR
+          T)).dt.days // 7 + 1
+      50  
+     ...
+      126          "menu": menu,
+      127          "notes": notes,
+      128      }
+      120 -    with sqlite3.connect(config.DB_PATH) as con:              
+      129 +    with connect() as con:                                    
+      130          for name, df in tables.items():
+      131              df.to_sql(name, con, index=False)
+      132          ids = pd.concat(
+     ...
+      138  
+      139  def add_chat_note(text: str, written_at: str, author: str = "u
+           ser") -> str:
+      140      """Record a user chat message as a citable source (U01, U0
+           2, ...)."""
+      132 -    with sqlite3.connect(config.DB_PATH) as con:              
+      141 +    with connect() as con:                                    
+      142          n = con.execute("SELECT COUNT(*) FROM notes WHERE sour
+           ce = 'chat'").fetchone()[0]
+      143          note_id = f"U{n + 1:02d}"
+      144          con.execute("INSERT INTO notes VALUES (?, ?, ?, 'chat'
+           , ?)", (note_id, written_at, author, text))
+     ...
+      147  
+      148  
+      149  def known_ids() -> set[str]:
+      141 -    with sqlite3.connect(config.DB_PATH) as con:              
+      150 +    with connect() as con:                                    
+      151          return {r[0] for r in con.execute("SELECT id FROM ids"
+           )}
+
+⏺ Now main.py — dispatch table, context-managed agent, shared notes query:
+
+⏺ Write(main.py)
+  ⎿  Added 36 lines, removed 61 lines
+      2  
+      3  import argparse
+      4  import shutil
+      5 -import sqlite3                                                  
+      5  
+      6  import config
+      7  import db
+     ...
+       9  import snapshot
+      10  from agent import Agent
+      11  
+      13 -NOW_ISO = "2026-10-05 06:00"                                   
+      12 +def _notes(where: str) -> list[tuple]:                         
+      13 +    with db.connect() as con:                                  
+      14 +        return con.execute(                                    
+      15 +            f"SELECT note_id, written_at, author, text FROM not
+         +es WHERE {where} ORDER BY written_at"                          
+      16 +        ).fetchall()                                           
+      17  
+      15 -                                                               
+      16 -def cmd_load(reset_memory: bool) -> None:                      
+      18 +def cmd_load(args: argparse.Namespace) -> None:                
+      19      db.build()
+      18 -    if reset_memory and config.MEMORY_DIR.exists():            
+      20 +    if args.reset_memory and config.MEMORY_DIR.exists():       
+      21          shutil.rmtree(config.MEMORY_DIR)
+      22      memory.init()
+      21 -    for line in memory.sync_checks("initial load").splitlines()
+         -:                                                              
+      22 -        print(line)                                            
+      23 +    if changes := memory.sync_checks("initial load"):          
+      24 +        print(changes)                                         
+      25      print(f"loaded {config.DB_PATH}; memory at {config.MEMORY_D
+          IR}")
+      26  
+      25 -                                                               
+      26 -def cmd_ingest_log() -> None:                                  
+      27 +def cmd_ingest_log(args: argparse.Namespace) -> None:          
+      28      """Replay the shift notebook in order, one note per chat tu
+          rn, as if the GM sent each one."""
+      28 -    with sqlite3.connect(config.DB_PATH) as con:               
+      29 -        notes = con.execute(                                   
+      30 -            "SELECT note_id, written_at, author, text FROM note
+         -s WHERE source = 'log' ORDER BY written_at"                    
+      31 -        ).fetchall()                                           
+      32 -    for note_id, written_at, author, text in notes:            
+      33 -        # Replay as of the note's time: later notes are hidden 
+         -so the agent can't see the future.                             
+      34 -        agent = Agent("chat", now=f"{written_at} America/New_Yo
+         -rk", notes_until=written_at)                                   
+      35 -        reply = agent.turn(f"[{note_id} | {written_at} | {autho
+         -r}] Shift note:\n{text}")                                      
+      36 -        agent.close()                                          
+      29 +    for note_id, written_at, author, text in _notes("source = '
+         +log'"):                                                        
+      30 +        with Agent("chat", now=f"{written_at} America/New_York"
+         +, notes_until=written_at) as agent:                            
+      31 +            reply = agent.turn(f"[{note_id} | {written_at} | {a
+         +uthor}] Shift note:\n{text}")                                  
+      32          print(f"--- {note_id}\n{reply}\n")
+      33  
+      39 -                                                               
+      40 -def cmd_chat() -> None:                                        
+      41 -    agent = Agent("chat")                                      
+      34 +def cmd_chat(args: argparse.Namespace) -> None:                
+      35      print("Ask a question or tell me something new. Ctrl-D to e
+          xit.")
+      43 -    try:                                                       
+      44 -        while True:                                            
+      45 -            text = input("\n> ").strip()                       
+      46 -            if not text:                                       
+      47 -                continue                                       
+      48 -            note_id = db.add_chat_note(text, NOW_ISO)          
+      49 -            print("\n" + agent.turn(f"[{note_id}] {text}"))    
+      50 -    except (EOFError, KeyboardInterrupt):                      
+      51 -        print()                                                
+      52 -    finally:                                                   
+      53 -        agent.close()                                          
+      36 +    with Agent("chat") as agent:                               
+      37 +        try:                                                   
+      38 +            while True:                                        
+      39 +                if text := input("\n> ").strip():              
+      40 +                    note_id = db.add_chat_note(text, config.NOW
+         +_ISO)                                                          
+      41 +                    print("\n" + agent.turn(f"[{note_id}] {text
+         +}"))                                                           
+      42 +        except (EOFError, KeyboardInterrupt):                  
+      43 +            print()                                            
+      44  
+      55 -                                                               
+      56 -def cmd_brief() -> None:                                       
+      57 -    with sqlite3.connect(config.DB_PATH) as con:               
+      58 -        recent = con.execute(                                  
+      59 -            "SELECT note_id, written_at, author, text FROM note
+         -s WHERE written_at >= '2026-09-28' ORDER BY written_at"        
+      60 -        ).fetchall()                                           
+      61 -    notes = "\n".join(f"[{n} | {w} | {a}] {t}" for n, w, a, t i
+         -n recent)                                                      
+      62 -    agent = Agent("brief")                                     
+      63 -    brief = agent.turn(                                        
+      64 -        "Write this morning's brief.\n\n"                      
+      65 -        f"<snapshot>\nFixed queries over the records, computed 
+         -before you started. Facts, not conclusions.\n\n"               
+      66 -        f"{snapshot.build()}\n</snapshot>\n\n"                 
+      67 -        f"Notes from the past week:\n{notes}"                  
+      68 -    )                                                          
+      69 -    agent.close()                                              
+      45 +def cmd_brief(args: argparse.Namespace) -> None:               
+      46 +    notes = "\n".join(f"[{n} | {w} | {a}] {t}" for n, w, a, t i
+         +n _notes("written_at >= '2026-09-28'"))                        
+      47 +    with Agent("brief") as agent:                              
+      48 +        brief = agent.turn(                                    
+      49 +            "Write this morning's brief.\n\n"                  
+      50 +            "<snapshot>\nFixed queries over the records, comput
+         +ed before you started. Facts, not conclusions.\n\n"            
+      51 +            f"{snapshot.build()}\n</snapshot>\n\n"             
+      52 +            f"Notes from the past week:\n{notes}"              
+      53 +        )                                                      
+      54      memory.write("/memories/briefs/2026-10-05.md",
+      55                   f"# Brief 2026-10-05\nsummary: morning brief f
+          or {config.NOW}\n\n{brief}",
+      56                   "morning brief 2026-10-05")
+      57      print(brief)
+      58  
+      75 -                                                               
+      59  def main() -> None:
+      60      parser = argparse.ArgumentParser(description="Operations ag
+          ent for Lantern Yard Kitchen")
+      61      sub = parser.add_subparsers(dest="cmd", required=True)
+      62      load = sub.add_parser("load", help="build the database from
+           data/ and docs/")
+      63      load.add_argument("--reset-memory", action="store_true")
+      81 -    sub.add_parser("ingest-log", help="replay GM_OPS_LOG.md not
+         -es into memory")                                               
+      82 -    sub.add_parser("chat", help="interactive questions and upda
+         -tes")                                                          
+      83 -    sub.add_parser("brief", help="write the morning brief")    
+      64 +    load.set_defaults(func=cmd_load)                           
+      65 +    sub.add_parser("ingest-log", help="replay GM_OPS_LOG.md not
+         +es into memory").set_defaults(func=cmd_ingest_log)             
+      66 +    sub.add_parser("chat", help="interactive questions and upda
+         +tes").set_defaults(func=cmd_chat)                              
+      67 +    sub.add_parser("brief", help="write the morning brief").set
+         +_defaults(func=cmd_brief)                                      
+      68      args = parser.parse_args()
+      69 +    args.func(args)                                            
+      70  
+      86 -    if args.cmd == "load":                                     
+      87 -        cmd_load(args.reset_memory)                            
+      88 -    elif args.cmd == "ingest-log":                             
+      89 -        cmd_ingest_log()                                       
+      90 -    elif args.cmd == "chat":                                   
+      91 -        cmd_chat()                                             
+      92 -    elif args.cmd == "brief":                                  
+      93 -        cmd_brief()                                            
+      94 -                                                               
+      95 -                                                               
+      71  if __name__ == "__main__":
+      72      main()
+
+⏺ Now agent.py — context manager, tool dispatch table, public memory.reason,
+  citation checks as data:
+
+⏺ Write(agent.py)
+  ⎿  Added 86 lines, removed 96 lines
+       4  import re
+       5  import sys
+       6  import time
+       7 -from pathlib import Path                                       
+       7  
+       8  import litellm
+       9  
+     ...
+      11  import db
+      12  import memory
+      13  import prompts
+      15 -from workspace import SCHEMA as PYTHON_SCHEMA                  
+      16 -from workspace import Workspace, manifest                      
+      14 +import workspace                                               
+      15  
+      16  ID_PATTERN = re.compile(
+      17      r"\b(INV-\d{3}(?:-L\d{2})?|POS-\d{2}-M\d{2}|COUNT-(?:OPEN|C
+          LOSE)-[A-Z]+|REC-M\d{2}-[A-Z]+"
+      18      r"|CAT-[A-Z0-9]+|[NU]\d{2}|M\d{2}|V\d)\b"
+      19  )
+      20  
+      21 +# (pattern, problem message); {} is filled with the offending m
+         +atches.                                                        
+      22 +CITATION_CHECKS = [                                            
+      23 +    (re.compile(r"\[(?:sales|purchases|invoices|counts|recipes|
+         +menu|vendors|catalog|notes)(?:[ ,][^\[\]]*)?\]", re.I),        
+      24 +     "These cite a table, not a record: {}. Cite the row IDs (e
+         +.g. POS-21-M05, INV-011-L02, COUNT-CLOSE-EGG)."),              
+      25 +    (re.compile(r"\((?:[^()]*\b(?:query|queries|snapshot|table|
+         +data)\b[^()]*)\)", re.I),                                      
+      26 +     "These name a source vaguely instead of citing rows: {}. R
+         +eplace them with row IDs in square brackets."),                
+      27 +]                                                              
+      28  
+      29  DIM, CYAN, GREEN, RED, YELLOW, BOLD, RESET = "\033[2m", "\033[3
+          6m", "\033[32m", "\033[31m", "\033[33m", "\033[1m", "\033[0m"
+      30  
+      26 -                                                               
+      31  def _trace(text: str, color: str = "", max_lines: int = 30) -> 
+          None:
+      32      """Live view of the agent's work, on stderr so stdout stays
+           the clean answer."""
+      33      if not config.TRACE:
+     ...
+       37          lines = lines[:max_lines] + [f"... ({len(lines) - max_
+           lines} more lines)"]
+       38      print(color + "\n".join(lines) + RESET, file=sys.stderr, f
+           lush=True)
+       39  
+       40 +def _trace_call(name: str, args: dict) -> None:               
+       41 +    if name == "python":                                      
+       42 +        _trace("▶ python\n" + "\n".join("    " + ln for ln in 
+          +args.get("code", "").splitlines()), CYAN)                     
+       43 +        return                                                
+       44 +    if name != "memory":                                      
+       45 +        _trace(f"▶ {name} {args}", CYAN)                      
+       46 +        return                                                
+       47 +    target = args.get("path") or args.get("query") or ""      
+       48 +    reason = f"  — {r}" if (r := memory.reason(args)) else "" 
+       49 +    _trace(f"▶ memory {args.get('command')} {target}{reason}",
+          + CYAN)                                                        
+       50 +    if args.get("command") == "edit":                         
+       51 +        _trace(f"    - {args.get('old', '')}\n    + {args.get(
+          +'new', '')}", CYAN, max_lines=10)                             
+       52 +    elif args.get("command") == "write":                      
+       53 +        _trace("    " + args.get("content", "").replace("\n", 
+          +"\n    "), CYAN, max_lines=10)                                
+       54  
+       37 -TABLE_CITATION = re.compile(                                  
+       38 -    r"\[(?:sales|purchases|invoices|counts|recipes|menu|vendor
+          -s|catalog|notes)(?:[ ,][^\[\]]*)?\]", re.I)                   
+       39 -                                                              
+       40 -                                                              
+       41 -VAGUE_CITATION = re.compile(r"\((?:[^()]*\b(?:query|queries|sn
+          -apshot|table|data)\b[^()]*)\)", re.IGNORECASE)                
+       42 -                                                              
+       43 -                                                              
+       55  def _is_error(out: str) -> bool:
+       56      return out.startswith("ERROR") or "<error>" in out
+       57  
+       58 +def _citation_problems(answer: str) -> str:                   
+       59 +    problems = []                                             
+       60 +    if unknown := sorted(set(ID_PATTERN.findall(answer)) - db.
+          +known_ids()):                                                 
+       61 +        problems.append(f"These IDs don't exist in the records
+          +: {', '.join(unknown)}.")                                     
+       62 +    for pattern, message in CITATION_CHECKS:                  
+       63 +        if hits := sorted(set(pattern.findall(answer))):      
+       64 +            problems.append(message.format(", ".join(hits)))  
+       65 +    return " ".join(problems)                                 
+       66  
+       67  def memory_block() -> str:
+       49 -    # Always loaded: the index, what's unresolved, and how to 
+          -read the records. Topic files load on demand.                 
+       68      open_items = (config.MEMORY_DIR / "open.md").read_text()
+       69      data = (config.MEMORY_DIR / "data.md").read_text()
+       70      return (f"MEMORY INDEX\n{memory.index()}\n\nOPEN (/memorie
+           s/open.md)\n{open_items}\n"
+       71              f"DATA (/memories/data.md)\n{data}")
+       72  
+       55 -                                                              
+       73  class Agent:
+       74      def __init__(self, mode: str, session: str | None = None, 
+           now: str = config.NOW,
+       75                   notes_until: str | None = None) -> None:
+       76          self.mode = mode
+       77          self.now = now
+       61 -        self.session = session or time.strftime("%Y%m%d-%H%M%S
+          -")                                                            
+       62 -        self.log_dir: Path = config.RUNS_DIR / self.session   
+       78 +        self.log_dir = config.RUNS_DIR / (session or time.strf
+          +time("%Y%m%d-%H%M%S"))                                        
+       79          self.log_dir.mkdir(parents=True, exist_ok=True)
+       64 -        self.workspace = Workspace(notes_until)               
+       65 -        self.schema = manifest()                              
+       80 +        self.workspace = workspace.Workspace(notes_until)     
+       81 +        self.schema = workspace.manifest()                    
+       82          self.messages: list[dict] = []
+       83          self.memory_changes: list[str] = []
+       84  
+       69 -    def _system(self) -> dict:                                
+       70 -        # Rebuilt every turn so the memory index reflects the 
+          -latest writes.                                                
+       71 -        content = prompts.build(self.mode, now=self.now, schem
+          -a=self.schema, memory=memory_block())                         
+       72 -        return {"role": "system", "content": content}         
+       85 +    def __enter__(self) -> "Agent":                           
+       86 +        return self                                           
+       87  
+       88 +    def __exit__(self, *exc) -> None:                         
+       89 +        self.close()                                          
+       90 +                                                              
+       91 +    def close(self) -> None:                                  
+       92 +        self.workspace.close()                                
+       93 +                                                              
+       94      def _log(self, name: str, record: dict) -> None:
+       95          with open(self.log_dir / f"{name}.jsonl", "a") as f:
+       96              f.write(json.dumps(record) + "\n")
+       97  
+       98 +    def _append(self, message: dict) -> None:                 
+       99 +        self.messages.append(message)                         
+      100 +        self._log("transcript", message)                      
+      101 +                                                              
+      102 +    def _python(self, args: dict) -> str:                     
+      103 +        out = self.workspace.run(args.get("code", ""))        
+      104 +        self._log("python", {"code": args.get("code"), "output
+          +": out})                                                      
+      105 +        return out                                            
+      106 +                                                              
+      107 +    def _memory(self, args: dict) -> str:                     
+      108 +        out = memory.run(args)                                
+      109 +        self._log("memory", {"args": args, "output": out})    
+      110 +        if out.startswith("OK "):                             
+      111 +            self.memory_changes.append(f"{out.splitlines()[0]}
+          +: {memory.reason(args) or ''}")                               
+      112 +        return out                                            
+      113 +                                                              
+      114      def _call_tool(self, name: str, args: dict) -> str:
+       79 -        if name == "python":                                  
+       80 -            out = self.workspace.run(args.get("code", ""))    
+       81 -            self._log("python", {"code": args.get("code"), "ou
+          -tput": out})                                                  
+       82 -            return out                                        
+       83 -        if name == "memory":                                  
+       84 -            out = memory.run(args)                            
+       85 -            self._log("memory", {"args": args, "output": out})
+       86 -            if out.startswith("OK "):                         
+       87 -                self.memory_changes.append(f"{out.splitlines()
+          -[0]}: {memory._reason(args) or ''}")                          
+       88 -            return out                                        
+       89 -        return f"ERROR: unknown tool {name!r}.\nFix: use pytho
+          -n or memory."                                                 
+      115 +        tools = {"python": self._python, "memory": self._memor
+          +y}                                                            
+      116 +        if name not in tools:                                 
+      117 +            return f"ERROR: unknown tool {name!r}.\nFix: use p
+          +ython or memory."                                             
+      118 +        return tools[name](args)                              
+      119  
+      120 +    def _run_call(self, call) -> str:                         
+      121 +        try:                                                  
+      122 +            args = json.loads(call.function.arguments or "{}")
+      123 +        except json.JSONDecodeError as e:                     
+      124 +            _trace(f"▶ {call.function.name} (bad arguments)", 
+          +RED)                                                          
+      125 +            return f"ERROR: tool arguments were not valid JSON
+          + ({e}).\nFix: send the arguments as a JSON object."           
+      126 +        _trace_call(call.function.name, args)                 
+      127 +        return self._call_tool(call.function.name, args)      
+      128 +                                                              
+      129      def _complete(self) -> str:
+      130          for step in range(1, config.MAX_STEPS + 1):
+      131              _trace(f"\n── step {step} " + "─" * 50, BOLD)
+       94 -            resp = litellm.completion(                        
+      132 +            system = prompts.build(self.mode, now=self.now, sc
+          +hema=self.schema, memory=memory_block())                      
+      133 +            msg = litellm.completion(                         
+      134                  model=config.LLM_MODEL,
+      135                  reasoning_effort=config.LLM_REASONING_EFFORT,
+       97 -                messages=[self._system(), *self.messages],    
+       98 -                tools=[PYTHON_SCHEMA, memory.SCHEMA],         
+       99 -            )                                                 
+      100 -            msg = resp.choices[0].message                     
+      136 +                messages=[{"role": "system", "content": system
+          +}, *self.messages],                                           
+      137 +                tools=[workspace.SCHEMA, memory.SCHEMA],      
+      138 +            ).choices[0].message                              
+      139              calls = msg.tool_calls or []
+      102 -            reasoning = getattr(msg, "reasoning_content", None
+          -)                                                             
+      103 -            if reasoning:                                     
+      140 +            if reasoning := getattr(msg, "reasoning_content", 
+          +None):                                                        
+      141                  _trace("thinking: " + reasoning, DIM, max_line
+           s=15)
+      142              if msg.content and calls:
+      143                  _trace(msg.content, YELLOW)
+      107 -            self.messages.append({                            
+      108 -                "role": "assistant",                          
+      109 -                "content": msg.content,                       
+      110 -                **({"tool_calls": [                           
+      111 -                    {"id": c.id, "type": "function",          
+      112 -                     "function": {"name": c.function.name, "ar
+          -guments": c.function.arguments}}                              
+      144 +            assistant = {"role": "assistant", "content": msg.c
+          +ontent}                                                       
+      145 +            if calls:                                         
+      146 +                assistant["tool_calls"] = [                   
+      147 +                    {"id": c.id, "type": "function", "function
+          +": {"name": c.function.name, "arguments": c.function.arguments
+          +}}                                                            
+      148                      for c in calls
+      114 -                ]} if calls else {}),                         
+      115 -            })                                                
+      116 -            self._log("transcript", self.messages[-1])        
+      149 +                ]                                             
+      150 +            self._append(assistant)                           
+      151              if not calls:
+      152                  return msg.content or ""
+      153              for c in calls:
+      120 -                try:                                          
+      121 -                    args = json.loads(c.function.arguments or 
+          -"{}")                                                         
+      122 -                except json.JSONDecodeError as e:             
+      123 -                    out = f"ERROR: tool arguments were not val
+          -id JSON ({e}).\nFix: send the arguments as a JSON object."    
+      124 -                    _trace(f"▶ {c.function.name} (bad argument
+          -s)", RED)                                                     
+      125 -                else:                                         
+      126 -                    _trace_call(c.function.name, args)        
+      127 -                    out = self._call_tool(c.function.name, arg
+          -s)                                                            
+      154 +                out = self._run_call(c)                       
+      155                  _trace("◀ " + out, RED if _is_error(out) else 
+           GREEN, max_lines=20)
+      129 -                self.messages.append({"role": "tool", "tool_ca
+          -ll_id": c.id, "content": out})                                
+      130 -                self._log("transcript", self.messages[-1])    
+      156 +                self._append({"role": "tool", "tool_call_id": 
+          +c.id, "content": out})                                        
+      157          _trace(f"stopped after {config.MAX_STEPS} steps withou
+           t a final answer", RED)
+      158          return "(stopped: step limit reached before a final an
+           swer)"
+      159  
+      160      def turn(self, user_text: str) -> str:
+      161          """Answer one user message. Returns the reply plus the
+            memory changes the tool confirmed."""
+      162          self.memory_changes = []
+      137 -        self.messages.append({"role": "user", "content": user_
+          -text})                                                        
+      138 -        self._log("transcript", self.messages[-1])            
+      163 +        self._append({"role": "user", "content": user_text})  
+      164          answer = self._complete()
+      140 -        problems = _citation_problems(answer)                 
+      141 -        if problems:                                          
+      165 +        if problems := _citation_problems(answer):            
+      166              _trace(f"citation check failed: {problems}", RED)
+      167              self.messages.append({"role": "user", "content": (
+      168                  f"[citation check] {problems} Fix the citation
+           s and give the full answer again."
+     ...
+      170              answer = self._complete()
+      171          changes = "\n".join(f"  - {c}" for c in self.memory_ch
+           anges) or "  (none)"
+      172          return f"{answer}\n\n[memory changes]\n{changes}"
+      149 -                                                              
+      150 -    def close(self) -> None:                                  
+      151 -        self.workspace.close()                                
+      152 -                                                              
+      153 -                                                              
+      154 -def _citation_problems(answer: str) -> str:                   
+      155 -    problems = []                                             
+      156 -    unknown = sorted(set(ID_PATTERN.findall(answer)) - db.know
+          -n_ids())                                                      
+      157 -    if unknown:                                               
+      158 -        problems.append(f"These IDs don't exist in the records
+          -: {', '.join(unknown)}.")                                     
+      159 -    tables = sorted(set(TABLE_CITATION.findall(answer)))      
+      160 -    if tables:                                                
+      161 -        problems.append(f"These cite a table, not a record: {'
+          -, '.join(tables)}. Cite the row IDs "                         
+      162 -                        "(e.g. POS-21-M05, INV-011-L02, COUNT-
+          -CLOSE-EGG).")                                                 
+      163 -    vague = sorted(set(VAGUE_CITATION.findall(answer)))       
+      164 -    if vague:                                                 
+      165 -        problems.append(f"These name a source vaguely instead 
+          -of citing rows: {', '.join(vague)}. "                         
+      166 -                        "Replace them with row IDs in square b
+          -rackets.")                                                    
+      167 -    return " ".join(problems)                                 
+      168 -                                                              
+      169 -                                                              
+      170 -def _trace_call(name: str, args: dict) -> None:               
+      171 -    if name == "python":                                      
+      172 -        _trace("▶ python\n" + "\n".join("    " + ln for ln in 
+          -args.get("code", "").splitlines()), CYAN)                     
+      173 -    elif name == "memory":                                    
+      174 -        target = args.get("path") or args.get("query") or ""  
+      175 -        reason = f"  — {memory._reason(args)}" if memory._reas
+          -on(args) else ""                                              
+      176 -        _trace(f"▶ memory {args.get('command')} {target}{reaso
+          -n}", CYAN)                                                    
+      177 -        if args.get("command") == "edit":                     
+      178 -            _trace(f"    - {args.get('old', '')}\n    + {args.
+          -get('new', '')}", CYAN, max_lines=10)                         
+      179 -        elif args.get("command") == "write":                  
+      180 -            _trace("    " + args.get("content", "").replace("\
+          -n", "\n    "), CYAN, max_lines=10)                            
+      181 -    else:                                                     
+      182 -        _trace(f"▶ {name} {args}", CYAN)                      
+
+⏺ Now memory.py — public reason, consistent error helper, table-driven run:
+
+⏺ Bash(python3 - <<'EOF'
+      p="memory.py"; s=open(p).read()…)
+  ⎿          return str(e)
+         if writes and args["path"].rstrip("/").endswith("data.md"):
+             if extra := sync_checks(args["reason"]):
+     … +11 lines (ctrl+o to expand)
+  ⎿  Updated memory.py (+22 -25)
+      209      return f"OK edited {path} (commit {sha})\n{diff}"
+      210  
+      211  
+      212 -REQUIRED = {"view": ["path"], "search": ["query"], "write": ["
+          -path", "content"], "edit": ["path", "old", "new"]}            
+      212  CITATION = re.compile(r"\[([^\[\]]+)\]")
+      213  
+      215 -                                                              
+      216 -def _reason(args: dict) -> str | None:                        
+      214 +def reason(args: dict) -> str | None:                         
+      215      """The given reason, or else the sources cited in the new 
+           text (e.g. '[N03, INV-013-L01]')."""
+      216      if args.get("reason"):
+      217          return args["reason"]
+      218      cited = CITATION.findall(args.get("new") or args.get("cont
+           ent") or "")
+      219      return f"sources: {', '.join(cited)}" if cited else None
+      220  
+      223 -                                                              
+      221  def sync_checks(reason: str) -> str:
+      222      """Apply map/set lines from data.md to the data and refres
+           h data-check questions in open.md."""
+      223      try:
+     ...
+      227      changes = checks.sync_open_questions()
+      228      if changes:
+      229          _commit(ROOT / "open.md", f"data checks: {', '.join(ch
+           anges)} ({reason})")
+      233 -    notes = [f"data check: {c}" for c in changes] + [f"WARNING
+          -: {p}" for p in problems]                                     
+      234 -    return "\n".join(notes)                                   
+      235 -                                                              
+      230 +    return "\n".join([f"data check: {c}" for c in changes] + [
+          +f"WARNING: {p}" for p in problems])                           
+      231 +                                                              
+      232 +# command -> (handler, required args)                         
+      233 +COMMANDS = {                                                  
+      234 +    "view": (lambda a: view(a["path"], a.get("as_of")), ["path
+          +"]),                                                          
+      235 +    "search": (lambda a: search(a["query"]), ["query"]),      
+      236 +    "write": (lambda a: write(a["path"], a["content"], a["reas
+          +on"]), ["path", "content"]),                                  
+      237 +    "edit": (lambda a: edit(a["path"], a["old"], a["new"], a["
+          +reason"]), ["path", "old", "new"]),                           
+      238 +}                                                             
+      239  
+      240  def run(args: dict) -> str:
+      241      cmd = args.get("command")
+      239 -    if cmd not in REQUIRED:                                   
+      242 +    if cmd not in COMMANDS:                                   
+      243          return f"ERROR: unknown command {cmd!r}.\nFix: use one
+            of view, search, write, edit."
+     … 35 more lines (ctrl+o to expand)
+
+⏺ MemoryError shadows a Python builtin — rename it:
+
+⏺ Bash(sed -i '' 's/MemoryError/MemoryToolError/g' memory.py && grep -c
+      MemoryToolError memory.py)
+  ⎿  7 matches in 7F:
+
+     [file] 147 (1):
+     … +21 lines (ctrl+o to expand)
+  ⎿  Updated memory.py (+7 -7)
+      79  }
+      80  
+      81  
+      82 -class MemoryError(Exception):                                  
+      82 +class MemoryToolError(Exception):                              
+      83      """A failed command. The message tells the model what happe
+          ned and how to fix it."""
+      84  
+      85  
+      86 -def _fail(what: str, fix: str) -> MemoryError:                 
+      87 -    return MemoryError(f"ERROR: {what}\nNothing was saved.\nFix
+         -: {fix}")                                                      
+      86 +def _fail(what: str, fix: str) -> MemoryToolError:             
+      87 +    return MemoryToolError(f"ERROR: {what}\nNothing was saved.\
+         +nFix: {fix}")                                                  
+      88  
+      89  
+      90  def _git(*args: str) -> str:
+     ...
+      144      if as_of:
+      145          rev = _git("rev-list", "-1", f"--before={as_of}", "HEA
+           D").strip()
+      146          if not rev:
+      147 -            raise MemoryError(f"ERROR: no memory existed befor
+          -e {as_of}.\nFix: use a later as_of, or omit it.")             
+      147 +            raise MemoryToolError(f"ERROR: no memory existed b
+          +efore {as_of}.\nFix: use a later as_of, or omit it.")         
+      148          try:
+      149              text = _git("show", f"{rev}:{_rel(p)}")
+      150          except subprocess.CalledProcessError:
+      151 -            raise MemoryError(f"ERROR: {path} did not exist at
+          - {as_of}.\nFix: omit as_of to read the current version.")     
+      151 +            raise MemoryToolError(f"ERROR: {path} did not exis
+          +t at {as_of}.\nFix: omit as_of to read the current version.") 
+      152      elif p.is_dir():
+      153          if p == ROOT.resolve():
+      154              return index()
+     ...
+      156      elif p.exists():
+      157          text = p.read_text()
+      158      else:
+      159 -        raise MemoryError(f"ERROR: {path} does not exist.\nExi
+          -sting files: {_existing()}")                                  
+      159 +        raise MemoryToolError(f"ERROR: {path} does not exist.\
+          +nExisting files: {_existing()}")                              
+      160      return "\n".join(f"{i:4} {ln}" for i, ln in enumerate(text
+           .splitlines(), 1))
+      161  
+      162  
+     ...
+      253                      "Fix: add a reason, or cite source IDs in 
+           brackets in the text, e.g. [N03, INV-013-L01].")
+      254      try:
+      255          out = handler(args)
+      256 -    except MemoryError as e:                                  
+     … 4 more lines (ctrl+o to expand)
+
+⏺ Now workspace client/server — collapse reply assembly:
+
+⏺ Bash(python3 - <<'EOF'
+      p="workspace.py"; s=open(p).read()…)
+  ⎿              [sys.executable, str(config.BACKEND / "workspace_server.py
+     "), str(config.DB_PATH)],
+                 cwd=config.BACKEND,
+     … +23 lines (ctrl+o to expand)
+  ⎿  Updated workspace.py (+7 -15)
+       2  
+       3  import json
+       4  import select
+       5 -import sqlite3                                                 
+       5  import subprocess
+       6  import sys
+       7  
+       8  import pandas as pd
+       9  
+      10  import config
+      12 -from db import ID_COLUMNS                                      
+      11 +import db                                                      
+      12  
+      13  TIMEOUT_S = 30
+      14  MAX_OUTPUT = 8000
+     ...
+      47  }
+      48  
+      49  
+      50 +# Reply fields in display order, with the tag each is wrapped i
+         +n.                                                             
+      51 +REPLY_TAGS = [("stdout", "stdout"), ("result", "result"), ("gap
+         +s", "note"), ("empty", "note"), ("error", "error")]            
+      52 +                                                               
+      53  class Workspace:
+      54      def __init__(self, notes_until: str | None = None) -> None:
+      55          self.proc: subprocess.Popen | None = None
+     ...
+      74              self.close()
+      75              return f"<error>Timed out after {TIMEOUT_S}s. Sessi
+          on restarted; variables were lost.</error>"
+      76          reply = json.loads(self.proc.stdout.readline())
+      75 -        parts = []                                             
+      76 -        if reply["stdout"]:                                    
+      77 -            parts.append(f"<stdout>{reply['stdout']}</stdout>")
+      78 -        if reply["result"] is not None:                        
+      79 -            parts.append(f"<result>{reply['result']}</result>")
+      80 -        if reply.get("gaps"):                                  
+      81 -            parts.append(f"<note>{reply['gaps']}</note>")      
+      82 -        if reply.get("empty"):                                 
+      83 -            parts.append(f"<note>{reply['empty']}</note>")     
+      84 -        if reply["error"]:                                     
+      85 -            parts.append(f"<error>{reply['error']}</error>")   
+      77 +        parts = [f"<{tag}>{reply[key]}</{tag}>" for key, tag in
+         + REPLY_TAGS if reply.get(key)]                                 
+      78          text = "\n".join(parts) or "<stdout></stdout>"
+     … 12 more lines (ctrl+o to expand)
+  ⎿  Updated workspace_server.py (+1 -1)
+      60      if notes_until:
+      61          ns["notes"] = ns["notes"][ns["notes"].written_at <= not
+          es_until].reset_index(drop=True)
+      62      out = io.StringIO()
+      63 -    result, error = None, None                                 
+      63 +    result = error = None                                      
+      64      try:
+      65          tree = ast.parse(code)
+      66          last = tree.body.pop() if tree.body and isinstance(tree
+          .body[-1], ast.Expr) else None
+
+⏺ Now checks.py — split the 55-line apply_memory into focused helpers:
+
+⏺ Bash(python3 - <<'EOF'
+      p="checks.py"; s=open(p).read()…)
+  ⎿  126:    for key in re.findall(r"^- \[ \] .*\(data check: (\S+)\)$", te
+     xt, re.M):
+  ⎿  Updated checks.py (+49 -51)
+       56  }
+       57  
+       58  
+       59 +NUMERIC_FIELDS = {"unit_price", "quantity"}                   
+       60 +                                                              
+       61 +def _apply_map(tables: dict[str, pd.DataFrame], valid: set[str
+          +], sku: str, ingredient: str, sources: str) -> str | None:    
+       62 +    cat, pur = tables["catalog"], tables["purchases"]         
+       63 +    if sku not in set(cat.sku):                               
+       64 +        return f"map ignored: SKU {sku} is not in the catalog"
+       65 +    if ingredient not in valid:                               
+       66 +        return f"map ignored: {ingredient!r} is not a kitchen 
+          +ingredient. Use one of: {'; '.join(sorted(valid))}"           
+       67 +    for df in (cat, pur):                                     
+       68 +        df.loc[df.sku == sku, ["ingredient", "overridden_by"]]
+          + = [ingredient, sources]                                      
+       69 +    return None                                               
+       70 +                                                              
+       71 +def _apply_set(tables: dict[str, pd.DataFrame], kind: str, key
+          +: str, field: str, value: str,                                
+       72 +               start: str, sources: str) -> str | None:       
+       73 +    table, key_col, fields = OVERRIDES[kind]                  
+       74 +    df = tables[table]                                        
+       75 +    if field not in fields:                                   
+       76 +        return f"set ignored: {kind} field {field!r} can't be 
+          +overridden. Allowed: {', '.join(sorted(fields))}"             
+       77 +    if key not in set(df[key_col]):                           
+       78 +        return f"set ignored: {kind} {key} does not exist"    
+       79 +    if field in NUMERIC_FIELDS:                               
+       80 +        try:                                                  
+       81 +            value = float(value)                              
+       82 +        except ValueError:                                    
+       83 +            return f"set ignored: {field} must be a number, go
+          +t {value!r}"                                                  
+       84 +    label = sources + (f" (from {start})" if start else "")   
+       85 +    rows = df[key_col] == key                                 
+       86 +    df.loc[rows, [field, "overridden_by"]] = [value, label]   
+       87 +    if kind == "invoice":                                     
+       88 +        pur = tables["purchases"]                             
+       89 +        pur.loc[pur.invoice_id == key, [field, "overridden_by"
+          +]] = [value, label]                                           
+       90 +    elif kind == "line":                                      
+       91 +        r = df.loc[rows]                                      
+       92 +        base_qty = r.quantity.where(r.unit != "case", r.quanti
+          +ty * r.pack_quantity)                                         
+       93 +        df.loc[rows, "cost"] = r.quantity * r.unit_price      
+       94 +        df.loc[rows, "base_qty"] = base_qty                   
+       95 +        df.loc[rows, "price_per_base"] = (df.loc[rows, "cost"]
+          + / base_qty).round(4)                                         
+     … 85 more lines (ctrl+o to expand)
+
+⏺ Now snapshot.py — vectorize the reconciliation row loop, use shared
+  connection:
+
+⏺ Bash(python3 - <<'EOF'
+      p="snapshot.py"; s=open(p).read()…)
+  ⎿  IDENTICAL
+  ⎿  Updated snapshot.py (+12 -14)
+      10  import pandas as pd
+      11  
+      12  import config
+      13 +import db                                                      
+      14  from checks import find_gaps
+      15  
+      16  END = str(config.PERIOD_END)
+     ...
+      47      closing = counts[counts.row_id.str.startswith("COUNT-CLOSE"
+          )].set_index("ingredient")
+      48      bought = _q(con, f"""SELECT ingredient, SUM(base_qty) AS pu
+          rchased FROM purchases
+      49                           WHERE delivery_date <= '{END}' AND ing
+          redient IS NOT NULL GROUP BY ingredient""")
+      49 -    use = expected_use(con).groupby("ingredient").use.sum()    
+      50 -    rows = []                                                  
+      51 -    for ing in opening.index:                                  
+      52 -        purchased = float(bought.set_index("ingredient").purcha
+         -sed.get(ing, 0))                                               
+      53 -        expected_close = opening.quantity[ing] + purchased - us
+         -e.get(ing, 0)                                                  
+      54 -        rows.append({                                          
+      55 -            "ingredient": ing, "unit": opening.unit[ing], "open
+         -ing": opening.quantity[ing],                                   
+      56 -            "purchased": purchased, "expected_use": round(use.g
+         -et(ing, 0), 1),                                                
+      57 -            "closing": closing.quantity[ing], "unexplained": ro
+         -und(closing.quantity[ing] - expected_close, 1),                
+      58 -            "count_rows": f"{opening.row_id[ing]}, {closing.row
+         -_id[ing]}",                                                    
+      59 -        })                                                     
+      60 -    return _table(pd.DataFrame(rows))                          
+      61 -                                                               
+      50 +    use = expected_use(con).groupby("ingredient").use.sum().rei
+         +ndex(opening.index, fill_value=0)                              
+      51 +    purchased = bought.set_index("ingredient").purchased.reinde
+         +x(opening.index, fill_value=0).astype(float)                   
+      52 +    closing = closing.reindex(opening.index)                   
+      53 +    df = pd.DataFrame({                                        
+      54 +        "unit": opening.unit, "opening": opening.quantity, "pur
+         +chased": purchased,                                            
+      55 +        "expected_use": use.round(1), "closing": closing.quanti
+         +ty,                                                            
+      56 +        "unexplained": (closing.quantity - (opening.quantity + 
+         +purchased - use)).round(1),                                    
+      57 +        "count_rows": opening.row_id + ", " + closing.row_id,  
+      58 +    })                                                         
+      59 +    return _table(df.reset_index())                            
+      60  
+      61  def stock_vs_use(con: sqlite3.Connection) -> str:
+      62      """On hand at last count vs average expected use over the l
+          ast two weeks, by day type."""
+     ...
+      119  
+      120  
+      121  def build() -> str:
+      124 -    with sqlite3.connect(config.DB_PATH) as con:              
+     … 4 more lines (ctrl+o to expand)
+
+⏺ Output byte-identical to baseline. Lint + compile check, then restore original
+  runtime data:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Fix the remaining lint nits:
+
+⏺ Bash(sed -i '' 's/vendors.vendor_name))$/vendors.vendor_name, strict=True))/'
+      db.py && sed -i '' 's/        except subprocess.CalledProcessError:$/
+        except sub…)
+  ⎿  All checks passed!
+
+     IDENTICAL
+  ⎿  Updated db.py (+1 -1)
+      64  
+      65  def normalize(raw: dict[str, pd.DataFrame]) -> dict[str, pd.Dat
+          aFrame]:
+      66      vendors = raw["raw_vendors"].copy()
+      67 -    vendor_by_account = dict(zip(vendors.account_number, vendor
+         -s.vendor_name))                                                
+      67 +    vendor_by_account = dict(zip(vendors.account_number, vendor
+         +s.vendor_name, strict=True))                                   
+      68      vendors["order_cutoff"] = None
+      69  
+      70      # Map a SKU to a kitchen ingredient only on an exact name m
+          atch. Anything else stays
+  ⎿  Updated memory.py (+4 -5)
+      147              raise MemoryToolError(f"ERROR: no memory existed b
+           efore {as_of}.\nFix: use a later as_of, or omit it.")
+      148          try:
+      149              text = _git("show", f"{rev}:{_rel(p)}")
+      150 -        except subprocess.CalledProcessError:                 
+      151 -            raise MemoryToolError(f"ERROR: {path} did not exis
+          -t at {as_of}.\nFix: omit as_of to read the current version.") 
+      150 +        except subprocess.CalledProcessError as e:            
+      151 +            raise MemoryToolError(f"ERROR: {path} did not exis
+          +t at {as_of}.\nFix: omit as_of to read the current version.") 
+          +from e                                                        
+      152      elif p.is_dir():
+      153          if p == ROOT.resolve():
+      154              return index()
+     ...
+      255          out = handler(args)
+      256      except MemoryToolError as e:
+      257          return str(e)
+      258 -    if writes and args["path"].rstrip("/").endswith("data.md")
+          -:                                                             
+      259 -        if extra := sync_checks(args["reason"]):              
+      260 -            out = f"{out}\n{extra}"                           
+      258 +    if writes and args["path"].rstrip("/").endswith("data.md")
+          + and (extra := sync_checks(args["reason"])):                  
+      259 +        out = f"{out}\n{extra}"                               
+      260      return out
+
+⏺ I refactored all 9 backend Python files. The deterministic outputs are
+  byte-identical before and after, and ruff passes on the F/E9/B/UP/SIM rules.
+  Net change: 235 lines added, 275 removed. The code was already fairly tight,
+  so most of the gain is in structure rather than line count. Nothing is
+  committed yet.
+
+  How I checked it. There are no tests, so I wrote a script that dumps:
+  - the morning-brief snapshot and the table summary the agent sees
+  - the data-check output, the normalized database tables and the citation
+    checker's output
+  - the replies from both tools on normal and error inputs
+
+  Its output before and after the refactor is identical.
+
+  The live LLM loop (chat, brief, ingest-log) did not run. I only confirmed it
+  imports and that the command-line help works, so run chat once to be sure the
+  agent loop behaves. Running the check rebuilds the database and memory, so I
+  backed up backend/data/ first and put it back afterwards.
+
+  Changes:
+  - db.py: added connect() and query() helpers. The repeated
+    sqlite3.connect(config.DB_PATH) calls across files now use them.
+  - main.py: commands are routed with set_defaults(func=...) instead of an
+    if/elif chain. One _notes() query helper replaces two copies. Agent is now
+    used in with blocks, so cleanup is guaranteed.
+  - agent.py:
+    - Agent works as a context manager.
+    - Tools are looked up in a dict.
+    - The per-call handling moved into _run_call, and _append replaces the
+      repeated "append message, then log it" pairs.
+    - The two citation regexes are now one data table.
+  - memory.py:
+    - run() uses a command table (handler plus required arguments).
+    - _reason became the public reason, since agent.py was calling the private
+      name.
+    - MemoryError became MemoryToolError, because the old name shadowed a Python
+      built-in.
+  - checks.py: the 55-line apply_memory is split into _apply_map and _apply_set.
+    Each returns a problem message or None.
+  - snapshot.py: the row-by-row loop in reconciliation is now vectorized pandas.
+  - workspace.py: the five if reply[...] blocks became one loop over a
+    REPLY_TAGS table.
+  - config.py: added NOW_ISO, and NOW is built from it. This replaces the copy
+    hard-coded in main.py.
+
+  Two small behavior changes:
+  - load no longer prints an empty line when there are no data-check changes.
+  - zip(..., strict=True) in db.normalize will raise if the two columns ever
+    differ in length. They come from the same table, so that can't happen.
+
+  Not changed:
+  - prompts.py, which is prompt text, not logic.
+  - The SQL.
+  - The JSON messages between the agent and the Python session process.
+
+  Possible next steps:
+  - Turn the baseline script into a real pytest regression test.
+  - Add a ruff config to pyproject.toml.
+  - Move the hard-coded dates '2026-09-28' and 2026-10-05 in cmd_brief into
+    config.
+
+  Should I commit this on feat-2?
+
+✻ Brewed for 3m 0s · done 11:30 PM

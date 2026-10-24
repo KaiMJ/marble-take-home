@@ -56,6 +56,45 @@ OVERRIDES = {
 }
 
 
+NUMERIC_FIELDS = {"unit_price", "quantity"}
+
+def _apply_map(tables: dict[str, pd.DataFrame], valid: set[str], sku: str, ingredient: str, sources: str) -> str | None:
+    cat, pur = tables["catalog"], tables["purchases"]
+    if sku not in set(cat.sku):
+        return f"map ignored: SKU {sku} is not in the catalog"
+    if ingredient not in valid:
+        return f"map ignored: {ingredient!r} is not a kitchen ingredient. Use one of: {'; '.join(sorted(valid))}"
+    for df in (cat, pur):
+        df.loc[df.sku == sku, ["ingredient", "overridden_by"]] = [ingredient, sources]
+    return None
+
+def _apply_set(tables: dict[str, pd.DataFrame], kind: str, key: str, field: str, value: str,
+               start: str, sources: str) -> str | None:
+    table, key_col, fields = OVERRIDES[kind]
+    df = tables[table]
+    if field not in fields:
+        return f"set ignored: {kind} field {field!r} can't be overridden. Allowed: {', '.join(sorted(fields))}"
+    if key not in set(df[key_col]):
+        return f"set ignored: {kind} {key} does not exist"
+    if field in NUMERIC_FIELDS:
+        try:
+            value = float(value)
+        except ValueError:
+            return f"set ignored: {field} must be a number, got {value!r}"
+    label = sources + (f" (from {start})" if start else "")
+    rows = df[key_col] == key
+    df.loc[rows, [field, "overridden_by"]] = [value, label]
+    if kind == "invoice":
+        pur = tables["purchases"]
+        pur.loc[pur.invoice_id == key, [field, "overridden_by"]] = [value, label]
+    elif kind == "line":
+        r = df.loc[rows]
+        base_qty = r.quantity.where(r.unit != "case", r.quantity * r.pack_quantity)
+        df.loc[rows, "cost"] = r.quantity * r.unit_price
+        df.loc[rows, "base_qty"] = base_qty
+        df.loc[rows, "price_per_base"] = (df.loc[rows, "cost"] / base_qty).round(4)
+    return None
+
 def apply_memory() -> list[str]:
     """Rebuild overridable tables from raw_* and apply '- map' and '- set' lines from data.md.
 
@@ -63,59 +102,18 @@ def apply_memory() -> list[str]:
     """
     path = config.MEMORY_DIR / "data.md"
     text = path.read_text() if path.exists() else ""
-    problems = []
-    with sqlite3.connect(config.DB_PATH) as con:
-        raw = {t: pd.read_sql_query(f"SELECT * FROM {t}", con) for t in db.RAW_FILES}
-        tables = db.normalize(raw)
+    with db.connect() as con:
+        tables = db.normalize({t: pd.read_sql_query(f"SELECT * FROM {t}", con) for t in db.RAW_FILES})
         valid = kitchen_ingredients(con)
-
-        for sku, ingredient, sources in MAP_LINE.findall(text):
-            cat, pur = tables["catalog"], tables["purchases"]
-            if sku not in set(cat.sku):
-                problems.append(f"map ignored: SKU {sku} is not in the catalog")
-            elif ingredient not in valid:
-                problems.append(f"map ignored: {ingredient!r} is not a kitchen ingredient. "
-                                f"Use one of: {'; '.join(sorted(valid))}")
-            else:
-                for df in (cat, pur):
-                    df.loc[df.sku == sku, ["ingredient", "overridden_by"]] = [ingredient, sources]
-
-        for kind, key, field, value, start, sources in SET_LINE.findall(text):
-            table, key_col, fields = OVERRIDES[kind]
-            df = tables[table]
-            label = f"{sources}" + (f" (from {start})" if start else "")
-            if field not in fields:
-                problems.append(f"set ignored: {kind} field {field!r} can't be overridden. "
-                                f"Allowed: {', '.join(sorted(fields))}")
-            elif key not in set(df[key_col]):
-                problems.append(f"set ignored: {kind} {key} does not exist")
-            else:
-                rows = df[key_col] == key
-                if field in ("unit_price", "quantity"):
-                    try:
-                        value = float(value)
-                    except ValueError:
-                        problems.append(f"set ignored: {field} must be a number, got {value!r}")
-                        continue
-                df.loc[rows, [field, "overridden_by"]] = [value, label]
-                if kind == "invoice":
-                    pur = tables["purchases"]
-                    pur.loc[pur.invoice_id == key, [field, "overridden_by"]] = [value, label]
-                if kind == "line":
-                    r = df.loc[rows]
-                    base_qty = r.quantity.where(r.unit != "case", r.quantity * r.pack_quantity)
-                    df.loc[rows, "cost"] = r.quantity * r.unit_price
-                    df.loc[rows, "base_qty"] = base_qty
-                    df.loc[rows, "price_per_base"] = (df.loc[rows, "cost"] / base_qty).round(4)
-
+        problems = [_apply_map(tables, valid, *m) for m in MAP_LINE.findall(text)]
+        problems += [_apply_set(tables, *m) for m in SET_LINE.findall(text)]
         for name in db.OVERRIDABLE:
             tables[name].to_sql(name, con, index=False, if_exists="replace")
-    return problems
-
+    return [p for p in problems if p]
 
 def sync_open_questions() -> list[str]:
     """Add a question to open.md for each new gap; close questions whose gap is gone."""
-    with sqlite3.connect(config.DB_PATH) as con:
+    with db.connect() as con:
         gaps = {g["key"]: g for g in find_gaps(con)}
     path = config.MEMORY_DIR / "open.md"
     text = path.read_text()
@@ -125,11 +123,11 @@ def sync_open_questions() -> list[str]:
             line = f"- [ ] {gap['question']} {TAG.format(key=key)}"
             text = text.replace("## Questions\n", f"## Questions\n{line}\n", 1)
             changes.append(f"opened {key}")
-    for line in re.findall(r"^- \[ \] .*\(data check: (\S+)\)$", text, re.M):
-        if line not in gaps:
-            text = re.sub(rf"^- \[ \] (.*\(data check: {re.escape(line)}\))$", r"- [x] \1 (resolved: mapping applied)",
+    for key in re.findall(r"^- \[ \] .*\(data check: (\S+)\)$", text, re.M):
+        if key not in gaps:
+            text = re.sub(rf"^- \[ \] (.*\(data check: {re.escape(key)}\))$", r"- [x] \1 (resolved: mapping applied)",
                           text, flags=re.M)
-            changes.append(f"closed {line}")
+            changes.append(f"closed {key}")
     if changes:
         path.write_text(text)
     return changes

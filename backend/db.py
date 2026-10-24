@@ -36,6 +36,15 @@ ID_COLUMNS = {
 }
 
 
+def connect(read_only: bool = False) -> sqlite3.Connection:
+    if read_only:
+        return sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True)
+    return sqlite3.connect(config.DB_PATH)
+
+def query(sql: str, params: tuple = ()) -> pd.DataFrame:
+    with connect() as con:
+        return pd.read_sql_query(sql, con, params=params)
+
 def _week(d: pd.Series) -> pd.Series:
     return (pd.to_datetime(d) - pd.Timestamp(config.PERIOD_START)).dt.days // 7 + 1
 
@@ -55,7 +64,7 @@ OVERRIDABLE = ("vendors", "catalog", "invoices", "purchases")
 
 def normalize(raw: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     vendors = raw["raw_vendors"].copy()
-    vendor_by_account = dict(zip(vendors.account_number, vendors.vendor_name))
+    vendor_by_account = dict(zip(vendors.account_number, vendors.vendor_name, strict=True))
     vendors["order_cutoff"] = None
 
     # Map a SKU to a kitchen ingredient only on an exact name match. Anything else stays
@@ -117,7 +126,7 @@ def build() -> None:
         "menu": menu,
         "notes": notes,
     }
-    with sqlite3.connect(config.DB_PATH) as con:
+    with connect() as con:
         for name, df in tables.items():
             df.to_sql(name, con, index=False)
         ids = pd.concat(
@@ -129,7 +138,7 @@ def build() -> None:
 
 def add_chat_note(text: str, written_at: str, author: str = "user") -> str:
     """Record a user chat message as a citable source (U01, U02, ...)."""
-    with sqlite3.connect(config.DB_PATH) as con:
+    with connect() as con:
         n = con.execute("SELECT COUNT(*) FROM notes WHERE source = 'chat'").fetchone()[0]
         note_id = f"U{n + 1:02d}"
         con.execute("INSERT INTO notes VALUES (?, ?, ?, 'chat', ?)", (note_id, written_at, author, text))
@@ -138,5 +147,5 @@ def add_chat_note(text: str, written_at: str, author: str = "user") -> str:
 
 
 def known_ids() -> set[str]:
-    with sqlite3.connect(config.DB_PATH) as con:
+    with connect() as con:
         return {r[0] for r in con.execute("SELECT id FROM ids")}

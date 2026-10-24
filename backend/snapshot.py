@@ -10,6 +10,7 @@ from datetime import timedelta
 import pandas as pd
 
 import config
+import db
 from checks import find_gaps
 
 END = str(config.PERIOD_END)
@@ -46,19 +47,16 @@ def reconciliation(con: sqlite3.Connection) -> str:
     closing = counts[counts.row_id.str.startswith("COUNT-CLOSE")].set_index("ingredient")
     bought = _q(con, f"""SELECT ingredient, SUM(base_qty) AS purchased FROM purchases
                          WHERE delivery_date <= '{END}' AND ingredient IS NOT NULL GROUP BY ingredient""")
-    use = expected_use(con).groupby("ingredient").use.sum()
-    rows = []
-    for ing in opening.index:
-        purchased = float(bought.set_index("ingredient").purchased.get(ing, 0))
-        expected_close = opening.quantity[ing] + purchased - use.get(ing, 0)
-        rows.append({
-            "ingredient": ing, "unit": opening.unit[ing], "opening": opening.quantity[ing],
-            "purchased": purchased, "expected_use": round(use.get(ing, 0), 1),
-            "closing": closing.quantity[ing], "unexplained": round(closing.quantity[ing] - expected_close, 1),
-            "count_rows": f"{opening.row_id[ing]}, {closing.row_id[ing]}",
-        })
-    return _table(pd.DataFrame(rows))
-
+    use = expected_use(con).groupby("ingredient").use.sum().reindex(opening.index, fill_value=0)
+    purchased = bought.set_index("ingredient").purchased.reindex(opening.index, fill_value=0).astype(float)
+    closing = closing.reindex(opening.index)
+    df = pd.DataFrame({
+        "unit": opening.unit, "opening": opening.quantity, "purchased": purchased,
+        "expected_use": use.round(1), "closing": closing.quantity,
+        "unexplained": (closing.quantity - (opening.quantity + purchased - use)).round(1),
+        "count_rows": opening.row_id + ", " + closing.row_id,
+    })
+    return _table(df.reset_index())
 
 def stock_vs_use(con: sqlite3.Connection) -> str:
     """On hand at last count vs average expected use over the last two weeks, by day type."""
@@ -121,7 +119,7 @@ def vendor_sheet(con: sqlite3.Connection) -> str:
 
 
 def build() -> str:
-    with sqlite3.connect(config.DB_PATH) as con:
+    with db.connect() as con:
         sections = {
             f"Weekly sales and purchases (spend by delivery date, through {END})": weekly(con),
             f"Stock reconciliation {config.PERIOD_START} to {END} (unexplained = closing - (opening + purchased - expected use))":

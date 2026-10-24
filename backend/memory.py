@@ -79,12 +79,12 @@ SCHEMA = {
 }
 
 
-class MemoryError(Exception):
+class MemoryToolError(Exception):
     """A failed command. The message tells the model what happened and how to fix it."""
 
 
-def _fail(what: str, fix: str) -> MemoryError:
-    return MemoryError(f"ERROR: {what}\nNothing was saved.\nFix: {fix}")
+def _fail(what: str, fix: str) -> MemoryToolError:
+    return MemoryToolError(f"ERROR: {what}\nNothing was saved.\nFix: {fix}")
 
 
 def _git(*args: str) -> str:
@@ -144,11 +144,11 @@ def view(path: str, as_of: str | None = None) -> str:
     if as_of:
         rev = _git("rev-list", "-1", f"--before={as_of}", "HEAD").strip()
         if not rev:
-            raise MemoryError(f"ERROR: no memory existed before {as_of}.\nFix: use a later as_of, or omit it.")
+            raise MemoryToolError(f"ERROR: no memory existed before {as_of}.\nFix: use a later as_of, or omit it.")
         try:
             text = _git("show", f"{rev}:{_rel(p)}")
-        except subprocess.CalledProcessError:
-            raise MemoryError(f"ERROR: {path} did not exist at {as_of}.\nFix: omit as_of to read the current version.")
+        except subprocess.CalledProcessError as e:
+            raise MemoryToolError(f"ERROR: {path} did not exist at {as_of}.\nFix: omit as_of to read the current version.") from e
     elif p.is_dir():
         if p == ROOT.resolve():
             return index()
@@ -156,7 +156,7 @@ def view(path: str, as_of: str | None = None) -> str:
     elif p.exists():
         text = p.read_text()
     else:
-        raise MemoryError(f"ERROR: {path} does not exist.\nExisting files: {_existing()}")
+        raise MemoryToolError(f"ERROR: {path} does not exist.\nExisting files: {_existing()}")
     return "\n".join(f"{i:4} {ln}" for i, ln in enumerate(text.splitlines(), 1))
 
 
@@ -209,17 +209,14 @@ def edit(path: str, old: str, new: str, reason: str) -> str:
     return f"OK edited {path} (commit {sha})\n{diff}"
 
 
-REQUIRED = {"view": ["path"], "search": ["query"], "write": ["path", "content"], "edit": ["path", "old", "new"]}
 CITATION = re.compile(r"\[([^\[\]]+)\]")
 
-
-def _reason(args: dict) -> str | None:
+def reason(args: dict) -> str | None:
     """The given reason, or else the sources cited in the new text (e.g. '[N03, INV-013-L01]')."""
     if args.get("reason"):
         return args["reason"]
     cited = CITATION.findall(args.get("new") or args.get("content") or "")
     return f"sources: {', '.join(cited)}" if cited else None
-
 
 def sync_checks(reason: str) -> str:
     """Apply map/set lines from data.md to the data and refresh data-check questions in open.md."""
@@ -230,35 +227,34 @@ def sync_checks(reason: str) -> str:
     changes = checks.sync_open_questions()
     if changes:
         _commit(ROOT / "open.md", f"data checks: {', '.join(changes)} ({reason})")
-    notes = [f"data check: {c}" for c in changes] + [f"WARNING: {p}" for p in problems]
-    return "\n".join(notes)
+    return "\n".join([f"data check: {c}" for c in changes] + [f"WARNING: {p}" for p in problems])
 
+# command -> (handler, required args)
+COMMANDS = {
+    "view": (lambda a: view(a["path"], a.get("as_of")), ["path"]),
+    "search": (lambda a: search(a["query"]), ["query"]),
+    "write": (lambda a: write(a["path"], a["content"], a["reason"]), ["path", "content"]),
+    "edit": (lambda a: edit(a["path"], a["old"], a["new"], a["reason"]), ["path", "old", "new"]),
+}
 
 def run(args: dict) -> str:
     cmd = args.get("command")
-    if cmd not in REQUIRED:
+    if cmd not in COMMANDS:
         return f"ERROR: unknown command {cmd!r}.\nFix: use one of view, search, write, edit."
-    missing = [k for k in REQUIRED[cmd] if args.get(k) is None]
-    if missing:
-        saving = "\nNothing was saved." if cmd in ("write", "edit") else ""
+    handler, required = COMMANDS[cmd]
+    writes = cmd in ("write", "edit")
+    if missing := [k for k in required if args.get(k) is None]:
+        saving = "\nNothing was saved." if writes else ""
         return f"ERROR: {cmd} is missing {', '.join(missing)}.{saving}\nFix: call again with {', '.join(missing)}."
-    if cmd in ("write", "edit"):
-        args = {**args, "reason": _reason(args)}
+    if writes:
+        args = {**args, "reason": reason(args)}
         if not args["reason"]:
             return (f"ERROR: {cmd} has no reason and the new text cites no sources.\nNothing was saved.\n"
                     "Fix: add a reason, or cite source IDs in brackets in the text, e.g. [N03, INV-013-L01].")
     try:
-        if cmd == "view":
-            return view(args["path"], args.get("as_of"))
-        if cmd == "search":
-            return search(args["query"])
-        if cmd == "write":
-            out = write(args["path"], args["content"], args["reason"])
-        else:
-            out = edit(args["path"], args["old"], args["new"], args["reason"])
-        if args["path"].rstrip("/").endswith("data.md"):
-            extra = sync_checks(args["reason"])
-            out = f"{out}\n{extra}" if extra else out
-        return out
-    except MemoryError as e:
+        out = handler(args)
+    except MemoryToolError as e:
         return str(e)
+    if writes and args["path"].rstrip("/").endswith("data.md") and (extra := sync_checks(args["reason"])):
+        out = f"{out}\n{extra}"
+    return out
