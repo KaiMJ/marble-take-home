@@ -54,6 +54,22 @@ def find(text: str) -> pd.DataFrame:
 ns: dict = {"pd": pd, "np": np, "sql": sql, "find": find, **_load()}
 
 
+MAX_ROWS = 50
+
+def _fmt(value) -> str:
+    """Compact table text: one 'a|b|c' line per row instead of space-padded columns."""
+    if isinstance(value, pd.Series):
+        value = value.to_frame()
+    if not isinstance(value, pd.DataFrame):
+        return repr(value)
+    if value.empty:
+        return f"Empty DataFrame (columns: {', '.join(map(str, value.columns))})"
+    keep_index = not isinstance(value.index, pd.RangeIndex)
+    text = value.head(MAX_ROWS).to_csv(sep="|", index=keep_index, float_format="%.10g", lineterminator="\n")
+    if len(value) > MAX_ROWS:
+        text += f"[{len(value) - MAX_ROWS} more rows of {len(value)}]\n"
+    return text.rstrip("\n")
+
 def run(code: str, notes_until: str | None) -> dict:
     # Reload each call: chat notes and SKU mappings may have changed. During log replay, hide later notes.
     ns.update(_load())
@@ -69,7 +85,7 @@ def run(code: str, notes_until: str | None) -> dict:
             if last is not None:
                 value = eval(compile(ast.Expression(last.value), "<agent>", "eval"), ns)
                 if value is not None:
-                    result = repr(value)
+                    result = _fmt(value)
     except Exception as e:
         # Show only the failing line of the agent's own code, not library internals.
         frames = [f for f in traceback.extract_tb(e.__traceback__) if f.filename == "<agent>"]
@@ -91,7 +107,7 @@ def _gap_note(code: str) -> str | None:
     if not gaps:
         return None
     lines = "\n".join(f"- {g['summary']}" for g in gaps)
-    return f"Missing labels (see open.md); results using these tables may be incomplete:\n{lines}"
+    return f"Missing labels (see Open in memory); results using these tables may be incomplete:\n{lines}"
 
 
 TABLES = ", ".join(ID_COLUMNS)

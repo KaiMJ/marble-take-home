@@ -5,7 +5,7 @@ Deciding what matters stays with the model.
 """
 
 import sqlite3
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -21,7 +21,7 @@ def _q(con: sqlite3.Connection, query: str) -> pd.DataFrame:
 
 
 def _table(df: pd.DataFrame) -> str:
-    return df.to_string(index=False)
+    return df.to_csv(sep="|", index=False, float_format="%.10g", lineterminator="\n").rstrip("\n")
 
 
 def expected_use(con: sqlite3.Connection) -> pd.DataFrame:
@@ -118,17 +118,111 @@ def vendor_sheet(con: sqlite3.Connection) -> str:
     return _table(df.fillna(""))
 
 
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def vendor_field(v: pd.Series, field: str, day: date) -> str:
+    """A vendor sheet field as of `day`: before a dated override, the value it replaced."""
+    start = v.get(f"{field}_from")
+    if pd.notna(start) and str(day) < start:
+        return v[f"previous_{field}"]
+    return v[field]
+
+
+def _delivers(v: pd.Series, day: date) -> bool:
+    return DAYS[day.weekday()] in str(vendor_field(v, "delivery_days", day))
+
+
+def coverage(con: sqlite3.Connection) -> str:
+    """Stock against the next two deliveries, from average expected use by weekday over the last 14 days."""
+    today = config.PERIOD_END + timedelta(days=1)
+    use = expected_use(con)
+    recent = use[use.date > str(config.PERIOD_END - timedelta(days=14))]
+    per_day = recent.groupby(["ingredient", "weekday"]).use.sum().div(
+        recent.groupby("weekday").date.nunique(), level="weekday")
+    vendors = _q(con, "SELECT * FROM vendors").set_index("vendor_id")
+    supplier = _q(con, "SELECT DISTINCT ingredient, vendor_id FROM catalog WHERE ingredient IS NOT NULL")
+    inbound = _q(con, f"""SELECT ingredient, delivery_date, base_qty, line_id FROM purchases
+                          WHERE delivery_date > '{END}' AND ingredient IS NOT NULL""")
+    counts = _q(con, "SELECT ingredient, quantity, row_id FROM counts WHERE row_id LIKE 'COUNT-CLOSE%'")
+    rows = []
+    for c in counts.itertuples():
+        v = vendors.loc[supplier[supplier.ingredient == c.ingredient].vendor_id.iloc[0]]
+        days = [today + timedelta(days=i) for i in range(21)]
+        daily = {d: per_day.get((c.ingredient, d.strftime("%a")), 0.0) for d in days}
+        arrivals = inbound[inbound.ingredient == c.ingredient]
+        # Today's order cutoff has passed, so the next delivery that can still be ordered is from tomorrow.
+        nxt, after = [d for d in days[1:] if _delivers(v, d)][:2]
+        stock, runs_out = c.quantity, None
+        for d in days:
+            stock += arrivals[arrivals.delivery_date == str(d)].base_qty.sum()
+            stock -= daily[d]
+            if stock < 0 and runs_out is None:
+                runs_out = d
+        before = sum(daily[d] for d in days if d < nxt)
+        cycle = sum(daily[d] for d in days if nxt <= d < after)
+        arriving = arrivals[arrivals.delivery_date < str(after)]
+        left_at_next = c.quantity + arriving.base_qty.sum() - before
+        rows.append({
+            "ingredient": c.ingredient, "vendor": v.name, "delivers_today": _delivers(v, today),
+            "on_hand": c.quantity,
+            "inbound": arriving.base_qty.sum(), "runs_out": f"{runs_out:%a %m-%d}" if runs_out else "> 3 weeks",
+            "next_delivery": f"{nxt:%a %m-%d}",
+            "order_cutoff": cutoff if pd.notna(cutoff := vendor_field(v, "order_cutoff", nxt)) else "unknown",
+            "use_before_next": round(before, 1),
+            "short_before_next": round(max(0.0, -left_at_next), 1),
+            "delivery_after": f"{after:%a %m-%d}", "use_between": round(cycle, 1),
+            "order_for_next": round(max(0.0, cycle - max(0.0, left_at_next)), 1),
+            "rows": ", ".join([c.row_id, *arriving.line_id]),
+        })
+    return _table(pd.DataFrame(rows))
+
+
+def anomalies(con: sqlite3.Connection) -> str:
+    """Records that fail a mechanical check. A hit is a lead to investigate, not a conclusion."""
+    rows = []
+    p = _q(con, "SELECT line_id, ingredient, price_per_base, base_unit FROM purchases WHERE ingredient IS NOT NULL")
+    median = p.groupby("ingredient").price_per_base.transform("median")
+    for r in p[(p.price_per_base > 2 * median) | (p.price_per_base < median / 2)].itertuples():
+        rows.append({"record": r.line_id, "check": "price over 2x off the ingredient's median",
+                     "detail": f"{r.price_per_base} vs median {median[r.Index]:.4f} per {r.base_unit}"})
+    vendors = _q(con, "SELECT * FROM vendors").set_index("account_number")
+    invoices = _q(con, """SELECT h.invoice_id, h.vendor_account, h.delivery_date, h.status, h.invoice_total,
+                                 h.tax + h.delivery_fee + SUM(l.line_total) AS computed
+                          FROM raw_invoice_headers h JOIN raw_invoice_lines l USING (invoice_id)
+                          GROUP BY h.invoice_id""")
+    for r in invoices.itertuples():
+        if abs(r.invoice_total - r.computed) > 0.01:
+            rows.append({"record": r.invoice_id, "check": "header total != lines + tax + fee",
+                         "detail": f"{r.invoice_total} vs {r.computed:.2f}"})
+        if r.delivery_date > END and r.status == "received":
+            rows.append({"record": r.invoice_id, "check": "entered received, delivery date after the last count",
+                         "detail": f"delivery {r.delivery_date}"})
+        day = date.fromisoformat(r.delivery_date)
+        if r.vendor_account in vendors.index and not _delivers(vendors.loc[r.vendor_account], day):
+            v = vendors.loc[r.vendor_account]
+            rows.append({"record": r.invoice_id, "check": "delivery on a day the vendor doesn't deliver",
+                         "detail": f"{day:%a %m-%d}; {v.vendor_id} delivers {vendor_field(v, 'delivery_days', day)}"})
+    return _table(pd.DataFrame(rows)) if rows else "(none)"
+
+
+# Table name (what an answer cites as [snapshot: <name>]) -> (description, query).
+TABLES = {
+    "anomalies": ("mechanical checks; each is a lead, not a conclusion", anomalies),
+    "stock coverage": ("from today, weekday-average use; excludes items without a recipe and demand spikes; "
+                       "a delivery today counts only if it is entered as inbound", coverage),
+    "weekly sales and purchases": (f"spend by delivery date, through {END}", weekly),
+    "stock reconciliation": (f"{config.PERIOD_START} to {END}; unexplained = closing - (opening + purchased "
+                             "- expected use)", reconciliation),
+    "stock vs use": ("on hand vs average expected daily use, last 14 days", stock_vs_use),
+    "purchase prices": ("per base unit", price_changes),
+    "vendor schedule": ("order sheet, with memory overrides shown in overridden_by", vendor_sheet),
+    "memory overrides": ("values changed by the Data section, with the source value", overrides),
+    "missing labels": ("rows excluded from the figures above",
+                       lambda con: "\n".join(f"- {g['summary']}" for g in find_gaps(con)) or "(none)"),
+}
+
+
 def build() -> str:
     with db.connect() as con:
-        sections = {
-            f"Weekly sales and purchases (spend by delivery date, through {END})": weekly(con),
-            f"Stock reconciliation {config.PERIOD_START} to {END} (unexplained = closing - (opening + purchased - expected use))":
-                reconciliation(con),
-            "Stock on hand vs average expected daily use, last 14 days": stock_vs_use(con),
-            "Purchase prices": price_changes(con),
-            "Vendor schedule (order sheet, with memory overrides shown in overridden_by)": vendor_sheet(con),
-            "Values overridden by memory (data.md), with the source value": overrides(con),
-            "Missing labels (rows excluded from the figures above)":
-                "\n".join(f"- {g['summary']}" for g in find_gaps(con)) or "(none)",
-        }
-    return "\n\n".join(f"### {title}\n{body}" for title, body in sections.items())
+        return "\n\n".join(f"### {name} ({desc})\n{query(con)}" for name, (desc, query) in TABLES.items())

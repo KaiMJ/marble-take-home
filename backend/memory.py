@@ -1,4 +1,4 @@
-"""`memory` tool: markdown files under /memories, versioned with git (one commit per write)."""
+"""`memory` tool: memory.md plus archived briefs, versioned with git (one commit per write)."""
 
 import difflib
 import re
@@ -9,53 +9,41 @@ import checks
 import config
 
 ROOT = config.MEMORY_DIR
-PREFIX = "/memories"
 
-# Starting layout. The agent fills these in and may add files, but the base topics stay stable
-# so related facts land in the same place across sessions.
-SEED_FILES = {
-    "open.md": (
-        "# Open items\n"
-        "summary: unresolved questions, todos, and hypotheses to revisit\n\n"
-        "## Questions\n\n## Todos\n\n## Hypotheses\n"
-    ),
-    "vendors.md": (
-        "# Vendors\n"
-        "summary: delivery days, order cutoffs, account details, vendor-reported changes\n"
-    ),
-    "ingredients.md": (
-        "# Ingredients\n"
-        "summary: prices, pack sizes, supply status, per-ingredient observations\n"
-    ),
-    "menu.md": (
-        "# Menu\n"
-        "summary: items, recipes and portions, launches and changes, demand patterns\n"
-    ),
-    "operations.md": (
-        "# Operations\n"
-        "summary: equipment, staff, waste, receiving, upcoming events\n"
-    ),
-    "data.md": (
-        "# Data\n"
-        "summary: how to read the records: SKU-to-ingredient links, corrections, known record problems\n\n"
-        "Lines in Mappings and Overrides change the data every query sees; delete a line to undo it.\n\n"
-        "## Mappings\n"
-        "Format: - map <SKU> -> <kitchen ingredient name> [sources]\n\n"
-        "## Overrides\n"
-        "Format: - set vendor <vendor_id> delivery_days|order_cutoff = <value> (optional: from YYYY-MM-DD) [sources]\n"
-        "Format: - set invoice <invoice_id> entered_status = <value> [sources]\n"
-        "Format: - set line <line_id> unit_price|quantity = <number> [sources]\n\n"
-        "## Known issues\n"
-    ),
-}
+# One file, loaded whole into every prompt. Fixed sections so related facts land in the same place.
+MAIN = "memory.md"
+SEED = (
+    "# Memory\n"
+    "summary: everything the agent keeps across sessions\n\n"
+    "## Vendors\n"
+    "Delivery days, order cutoffs, vendor-reported changes.\n\n"
+    "## Ingredients\n"
+    "Prices, pack sizes, supply status.\n\n"
+    "## Menu\n"
+    "Items, portions, launches, demand patterns.\n\n"
+    "## Operations\n"
+    "Equipment, staff, waste, receiving, upcoming events.\n\n"
+    "## Open\n"
+    "### Questions\n\n### Todos\n\n### Hypotheses\n\n"
+    "## Data\n"
+    "Map and set lines change the data every query sees; delete a line to undo it.\n\n"
+    "### Mappings\n"
+    "Format: - map <SKU> -> <kitchen ingredient name> [sources]\n\n"
+    "### Overrides\n"
+    "Format: - set vendor <vendor_id> delivery_days|order_cutoff = <value> (optional: from YYYY-MM-DD) [sources]\n"
+    "Format: - set invoice <invoice_id> entered_status = <value> [sources]\n"
+    "Format: - set line <line_id> unit_price|quantity = <number> [sources]\n\n"
+    "### Known issues\n"
+)
 
 SCHEMA = {
     "type": "function",
     "function": {
         "name": "memory",
         "description": (
-            "Read and edit your memory: markdown files under /memories. Every change is versioned. "
-            "view: a file, or a directory to list files with their summaries; as_of reads a past version. "
+            "Read and edit your memory: memory.md (shown in full in the prompt; the default path) plus past "
+            "briefs under briefs/. Every change is versioned. "
+            "view: a file, or a directory to list files; as_of reads a past version. "
             "search: find lines by words or an ID. "
             "write: create or replace a whole file (empty content deletes it). "
             "edit: replace one exact snippet; view the file first and copy the text exactly. "
@@ -65,7 +53,7 @@ SCHEMA = {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "enum": ["view", "search", "write", "edit"]},
-                "path": {"type": "string", "description": "e.g. /memories/ingredients.md"},
+                "path": {"type": "string", "description": "default memory.md; briefs/<date>.md for past briefs; . lists files"},
                 "content": {"type": "string", "description": "write: full file content; empty string deletes"},
                 "old": {"type": "string", "description": "edit: exact text to replace (must occur once)"},
                 "new": {"type": "string", "description": "edit: replacement text"},
@@ -97,8 +85,7 @@ def init() -> None:
         _git("init", "-q")
         _git("config", "user.name", "ops-agent")
         _git("config", "user.email", "ops-agent@localhost")
-        for name, text in SEED_FILES.items():
-            (ROOT / name).write_text(text)
+        (ROOT / MAIN).write_text(SEED)
         _git("add", "-A")
         _git("commit", "-qm", "init memory layout")
 
@@ -108,11 +95,10 @@ def _files() -> list[Path]:
 
 
 def _resolve(path: str) -> Path:
-    if not path or not (path == PREFIX or path.startswith(PREFIX + "/")):
-        raise _fail(f"path {path!r} is outside {PREFIX}.", f"use a path like {PREFIX}/ingredients.md.")
-    p = (ROOT / path[len(PREFIX):].lstrip("/")).resolve()
+    """Paths are relative to the memory folder: memory.md, briefs/2026-10-05.md; '.' is the folder."""
+    p = (ROOT / path.lstrip("/")).resolve()
     if p != ROOT.resolve() and ROOT.resolve() not in p.parents:
-        raise _fail(f"path {path!r} escapes {PREFIX}.", f"use a path like {PREFIX}/ingredients.md.")
+        raise _fail(f"path {path!r} is outside memory.", f"use {MAIN}.")
     return p
 
 
@@ -121,7 +107,7 @@ def _rel(p: Path) -> str:
 
 
 def _existing() -> str:
-    return ", ".join(f"{PREFIX}/{_rel(f)}" for f in _files())
+    return ", ".join(_rel(f) for f in _files())
 
 
 def _commit(p: Path, reason: str) -> str:
@@ -135,7 +121,7 @@ def index() -> str:
     for f in _files():
         summary = next((ln[8:].strip() for ln in f.read_text().splitlines() if ln.startswith("summary:")), "")
         changed = _git("log", "-1", "--format=%cs", "--", _rel(f)).strip()
-        lines.append(f"{PREFIX}/{_rel(f)} ({changed}): {summary}")
+        lines.append(f"{_rel(f)} ({changed}): {summary}")
     return "\n".join(lines) or "(empty)"
 
 
@@ -168,7 +154,7 @@ def search(query: str) -> str:
         for i, ln in enumerate(lines):
             if all(t in ln.lower() for t in terms):
                 ctx = lines[max(0, i - 1): i + 2]
-                hits.append(f"{PREFIX}/{_rel(f)}:{i + 1}\n  " + "\n  ".join(ctx))
+                hits.append(f"{_rel(f)}:{i + 1}\n  " + "\n  ".join(ctx))
                 if len(hits) == 20:
                     return "\n".join(hits)
     return "\n".join(hits) or f"No matches for {query!r}. Try fewer or different words."
@@ -215,18 +201,19 @@ def reason(args: dict) -> str | None:
     """The given reason, or else the sources cited in the new text (e.g. '[N03, INV-013-L01]')."""
     if args.get("reason"):
         return args["reason"]
-    cited = CITATION.findall(args.get("new") or args.get("content") or "")
+    # Skip markdown checkboxes ("- [ ]", "- [x]"), which the bracket pattern also matches.
+    cited = [c for c in CITATION.findall(args.get("new") or args.get("content") or "") if c.strip() not in ("", "x")]
     return f"sources: {', '.join(cited)}" if cited else None
 
 def sync_checks(reason: str) -> str:
-    """Apply map/set lines from data.md to the data and refresh data-check questions in open.md."""
+    """Apply map/set lines to the data and refresh data-check questions under Open."""
     try:
         problems = checks.apply_memory()
     except Exception as e:  # never lose the memory write because applying it failed
-        problems = [f"data.md was saved but could not be applied to the data ({type(e).__name__}: {e})"]
+        problems = [f"memory was saved but could not be applied to the data ({type(e).__name__}: {e})"]
     changes = checks.sync_open_questions()
     if changes:
-        _commit(ROOT / "open.md", f"data checks: {', '.join(changes)} ({reason})")
+        _commit(ROOT / MAIN, f"data checks: {', '.join(changes)} ({reason})")
     return "\n".join([f"data check: {c}" for c in changes] + [f"WARNING: {p}" for p in problems])
 
 # command -> (handler, required args)
@@ -242,6 +229,8 @@ def run(args: dict) -> str:
     if cmd not in COMMANDS:
         return f"ERROR: unknown command {cmd!r}.\nFix: use one of view, search, write, edit."
     handler, required = COMMANDS[cmd]
+    if cmd != "search" and not args.get("path"):
+        args = {**args, "path": MAIN}
     writes = cmd in ("write", "edit")
     if missing := [k for k in required if args.get(k) is None]:
         saving = "\nNothing was saved." if writes else ""
@@ -255,6 +244,6 @@ def run(args: dict) -> str:
         out = handler(args)
     except MemoryToolError as e:
         return str(e)
-    if writes and args["path"].rstrip("/").endswith("data.md") and (extra := sync_checks(args["reason"])):
+    if writes and args["path"].rstrip("/").endswith(MAIN) and (extra := sync_checks(args["reason"])):
         out = f"{out}\n{extra}"
     return out

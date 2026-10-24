@@ -9,7 +9,7 @@ ROOT = BACKEND.parent
 load_dotenv(ROOT / ".env")
 
 LLM_MODEL = os.getenv("LLM_MODEL", "xai/grok-4.3-latest")
-LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low")
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "high")
 
 DATA_DIR = ROOT / "data"
 OPS_LOG = ROOT / "docs" / "GM_OPS_LOG.md"

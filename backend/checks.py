@@ -1,7 +1,7 @@
 """Missing-label checks: records the data can't be interpreted without.
 
-The checks only detect gaps; they never fill them. Gaps become questions in /memories/open.md.
-Answers and corrections are recorded in /memories/data.md ('- map ...', '- set ...') and applied to
+The checks only detect gaps; they never fill them. Gaps become questions under Open in memory.md.
+Answers and corrections are recorded under its Data section ('- map ...', '- set ...') and applied to
 the normalized tables (raw_* stay untouched), so every later query sees them with an overridden_by source.
 """
 
@@ -28,7 +28,7 @@ def find_gaps(con: sqlite3.Connection) -> list[dict]:
             "summary": f"{lines or 'no'} purchase lines have no ingredient (SKU {sku})",
             "question": (f"SKU {sku} ({desc!r}, vendor {vendor}) isn't linked to a kitchen ingredient, so its "
                          f"purchase lines are missing from ingredient totals [{cat_id}, {lines or 'no lines'}]. "
-                         f"Which ingredient is it? Record as '- map {sku} -> <ingredient> [sources]' in /memories/data.md."),
+                         f"Which ingredient is it? Record as '- map {sku} -> <ingredient> [sources]' under Data in memory.md."),
         })
     for item_id, name, rows in con.execute("""
         SELECT s.item_id, s.item, GROUP_CONCAT(s.row_id, ', ')
@@ -83,6 +83,9 @@ def _apply_set(tables: dict[str, pd.DataFrame], kind: str, key: str, field: str,
             return f"set ignored: {field} must be a number, got {value!r}"
     label = sources + (f" (from {start})" if start else "")
     rows = df[key_col] == key
+    if kind == "vendor" and start:
+        # Keep the old value for dates before the change; snapshot reads these through vendor_field().
+        df.loc[rows, [f"previous_{field}", f"{field}_from"]] = [df.loc[rows, field].iloc[0], start]
     df.loc[rows, [field, "overridden_by"]] = [value, label]
     if kind == "invoice":
         pur = tables["purchases"]
@@ -96,11 +99,11 @@ def _apply_set(tables: dict[str, pd.DataFrame], kind: str, key: str, field: str,
     return None
 
 def apply_memory() -> list[str]:
-    """Rebuild overridable tables from raw_* and apply '- map' and '- set' lines from data.md.
+    """Rebuild overridable tables from raw_* and apply '- map' and '- set' lines from memory.md.
 
     Returns problems to report back to the agent.
     """
-    path = config.MEMORY_DIR / "data.md"
+    path = config.MEMORY_DIR / "memory.md"
     text = path.read_text() if path.exists() else ""
     with db.connect() as con:
         tables = db.normalize({t: pd.read_sql_query(f"SELECT * FROM {t}", con) for t in db.RAW_FILES})
@@ -112,16 +115,16 @@ def apply_memory() -> list[str]:
     return [p for p in problems if p]
 
 def sync_open_questions() -> list[str]:
-    """Add a question to open.md for each new gap; close questions whose gap is gone."""
+    """Add a question under Open for each new gap; close questions whose gap is gone."""
     with db.connect() as con:
         gaps = {g["key"]: g for g in find_gaps(con)}
-    path = config.MEMORY_DIR / "open.md"
+    path = config.MEMORY_DIR / "memory.md"
     text = path.read_text()
     changes = []
     for key, gap in gaps.items():
         if TAG.format(key=key) not in text:
             line = f"- [ ] {gap['question']} {TAG.format(key=key)}"
-            text = text.replace("## Questions\n", f"## Questions\n{line}\n", 1)
+            text = text.replace("### Questions\n", f"### Questions\n{line}\n", 1)
             changes.append(f"opened {key}")
     for key in re.findall(r"^- \[ \] .*\(data check: (\S+)\)$", text, re.M):
         if key not in gaps:
@@ -131,3 +134,36 @@ def sync_open_questions() -> list[str]:
     if changes:
         path.write_text(text)
     return changes
+
+
+# Citations. An answer cites in square brackets: row or note IDs [INV-099-L01, N15], a range over one
+# table [POS-15-M01 to POS-21-M01], or a snapshot table [snapshot: stock coverage]. Every bracket must
+# resolve to one of these; the check can't tell whether the cited rows support the claim.
+ID_PATTERN = re.compile(
+    r"\b(INV-\d{3}(?:-L\d{2})?|POS-\d{2}-M\d{2}|COUNT-(?:OPEN|CLOSE)-[A-Z]+|REC-M\d{2}-[A-Z]+"
+    r"|CAT-[A-Z0-9]+|[NU]\d{2}|M\d{2}|V\d)\b"
+)
+BRACKET = re.compile(r"\[([^\[\]]+)\]")
+RANGE = re.compile(rf"({ID_PATTERN.pattern})\s+to\s+({ID_PATTERN.pattern})")
+
+
+def citation_problems(answer: str, snapshot_tables: set[str]) -> list[str]:
+    tables = db.id_tables()
+    problems = []
+    for cite in BRACKET.findall(answer):
+        cite = cite.strip()
+        if cite in ("", "x"):  # markdown checkbox
+            continue
+        if cite.lower().startswith("snapshot:"):
+            if (name := cite.split(":", 1)[1].strip().lower()) not in snapshot_tables:
+                problems.append(f"[{cite}]: no snapshot table {name!r}; tables are {', '.join(sorted(snapshot_tables))}")
+            continue
+        for start, end in ((m[1], m[3]) for m in RANGE.finditer(cite)):
+            if start in tables and end in tables and (tables[start] != tables[end] or start > end):
+                problems.append(f"[{cite}]: {start} to {end} is not a range within one table")
+        ids = ID_PATTERN.findall(cite)
+        if unknown := sorted({i for i in ids if i not in tables}):
+            problems.append(f"[{cite}]: {', '.join(unknown)} not in the records")
+        elif not ids:
+            problems.append(f"[{cite}]: names no row, note or snapshot table")
+    return problems

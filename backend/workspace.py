@@ -34,7 +34,7 @@ SCHEMA = {
 TABLE_DESCRIPTIONS = {
     "purchases": "one row per invoice line; base_qty in base units (lb or each) via the catalog pack size; "
                  "ingredient is empty where the SKU's description doesn't match a kitchen ingredient name; "
-                 "overridden_by shows values changed by memory (data.md), raw_invoice_lines has the originals",
+                 "overridden_by shows values changed by memory (Data section), raw_invoice_lines has the originals",
     "invoices": "one row per invoice; entered_status is typed by the office, not scanned at receiving; "
                 "overridden_by shows memory corrections",
     "sales": "one row per POS item per day; days without sales of an item omit that item",

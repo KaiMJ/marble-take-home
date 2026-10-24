@@ -1,30 +1,19 @@
 """Agent loop: assemble the prompt, run tool calls, check citations, log everything."""
 
 import json
-import re
 import sys
 import time
 
 import litellm
 
+import checks
 import config
-import db
 import memory
 import prompts
+import snapshot
 import workspace
 
-ID_PATTERN = re.compile(
-    r"\b(INV-\d{3}(?:-L\d{2})?|POS-\d{2}-M\d{2}|COUNT-(?:OPEN|CLOSE)-[A-Z]+|REC-M\d{2}-[A-Z]+"
-    r"|CAT-[A-Z0-9]+|[NU]\d{2}|M\d{2}|V\d)\b"
-)
-
-# (pattern, problem message); {} is filled with the offending matches.
-CITATION_CHECKS = [
-    (re.compile(r"\[(?:sales|purchases|invoices|counts|recipes|menu|vendors|catalog|notes)(?:[ ,][^\[\]]*)?\]", re.I),
-     "These cite a table, not a record: {}. Cite the row IDs (e.g. POS-21-M05, INV-011-L02, COUNT-CLOSE-EGG)."),
-    (re.compile(r"\((?:[^()]*\b(?:query|queries|snapshot|table|data)\b[^()]*)\)", re.I),
-     "These name a source vaguely instead of citing rows: {}. Replace them with row IDs in square brackets."),
-]
+CITATION_RETRIES = 2
 
 DIM, CYAN, GREEN, RED, YELLOW, BOLD, RESET = "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[33m", "\033[1m", "\033[0m"
 
@@ -55,32 +44,48 @@ def _trace_call(name: str, args: dict) -> None:
 def _is_error(out: str) -> bool:
     return out.startswith("ERROR") or "<error>" in out
 
-def _citation_problems(answer: str) -> str:
-    problems = []
-    if unknown := sorted(set(ID_PATTERN.findall(answer)) - db.known_ids()):
-        problems.append(f"These IDs don't exist in the records: {', '.join(unknown)}.")
-    for pattern, message in CITATION_CHECKS:
-        if hits := sorted(set(pattern.findall(answer))):
-            problems.append(message.format(", ".join(hits)))
-    return " ".join(problems)
+def _cost(response) -> float | None:
+    """Dollar cost of one completion, or None when litellm has no price for the model."""
+    try:
+        return litellm.completion_cost(completion_response=response)
+    except Exception:
+        return None
+
+class Usage:
+    """Running token and dollar totals; cost stays None once any call can't be priced."""
+
+    def __init__(self) -> None:
+        self.calls = self.prompt_tokens = self.completion_tokens = 0
+        self.cost: float | None = 0.0
+
+    def add(self, prompt_tokens: int, completion_tokens: int, cost: float | None) -> None:
+        self.calls += 1
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        self.cost = None if cost is None or self.cost is None else self.cost + cost
+
+    def __str__(self) -> str:
+        cost = f"${self.cost:.4f}" if self.cost is not None else "cost unknown"
+        return f"{self.calls} calls, {self.prompt_tokens:,} in / {self.completion_tokens:,} out tokens, {cost}"
 
 def memory_block() -> str:
-    open_items = (config.MEMORY_DIR / "open.md").read_text()
-    data = (config.MEMORY_DIR / "data.md").read_text()
-    return (f"MEMORY INDEX\n{memory.index()}\n\nOPEN (/memories/open.md)\n{open_items}\n"
-            f"DATA (/memories/data.md)\n{data}")
+    return f"MEMORY (memory.md)\n{(config.MEMORY_DIR / memory.MAIN).read_text()}"
 
 class Agent:
     def __init__(self, mode: str, session: str | None = None, now: str = config.NOW,
-                 notes_until: str | None = None) -> None:
+                 notes_until: str | None = None, snapshot: bool = False) -> None:
         self.mode = mode
         self.now = now
         self.log_dir = config.RUNS_DIR / (session or time.strftime("%Y%m%d-%H%M%S"))
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.workspace = workspace.Workspace(notes_until)
         self.schema = workspace.manifest()
+        # Log replay runs in the past, so it must not see the snapshot (closing counts, later invoices).
+        self.with_snapshot = snapshot
         self.messages: list[dict] = []
         self.memory_changes: list[str] = []
+        self.usage = Usage()  # whole session
+        self.turn_usage = Usage()
 
     def __enter__(self) -> "Agent":
         return self
@@ -98,6 +103,9 @@ class Agent:
     def _append(self, message: dict) -> None:
         self.messages.append(message)
         self._log("transcript", message)
+
+    def _citation_problems(self, answer: str) -> list[str]:
+        return checks.citation_problems(answer, set(snapshot.TABLES) if self.with_snapshot else set())
 
     def _python(self, args: dict) -> str:
         out = self.workspace.run(args.get("code", ""))
@@ -126,16 +134,29 @@ class Agent:
         _trace_call(call.function.name, args)
         return self._call_tool(call.function.name, args)
 
+    def _record_usage(self, response) -> None:
+        u = response.usage
+        prompt_tokens, completion_tokens = u.prompt_tokens or 0, u.completion_tokens or 0
+        cost = _cost(response)
+        for usage in (self.usage, self.turn_usage):
+            usage.add(prompt_tokens, completion_tokens, cost)
+        self._log("usage", {"model": config.LLM_MODEL, "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens, "cost": cost})
+
     def _complete(self) -> str:
         for step in range(1, config.MAX_STEPS + 1):
             _trace(f"\n── step {step} " + "─" * 50, BOLD)
-            system = prompts.build(self.mode, now=self.now, schema=self.schema, memory=memory_block())
-            msg = litellm.completion(
+            # Rebuilt each step: memory and its data overrides may have changed during the turn.
+            system = prompts.build(self.mode, now=self.now, schema=self.schema, memory=memory_block(),
+                                   snapshot=snapshot.build() if self.with_snapshot else "")
+            response = litellm.completion(
                 model=config.LLM_MODEL,
                 reasoning_effort=config.LLM_REASONING_EFFORT,
                 messages=[{"role": "system", "content": system}, *self.messages],
                 tools=[workspace.SCHEMA, memory.SCHEMA],
-            ).choices[0].message
+            )
+            self._record_usage(response)
+            msg = response.choices[0].message
             calls = msg.tool_calls or []
             if reasoning := getattr(msg, "reasoning_content", None):
                 _trace("thinking: " + reasoning, DIM, max_lines=15)
@@ -160,13 +181,20 @@ class Agent:
     def turn(self, user_text: str) -> str:
         """Answer one user message. Returns the reply plus the memory changes the tool confirmed."""
         self.memory_changes = []
+        self.turn_usage = Usage()
         self._append({"role": "user", "content": user_text})
         answer = self._complete()
-        if problems := _citation_problems(answer):
-            _trace(f"citation check failed: {problems}", RED)
-            self.messages.append({"role": "user", "content": (
-                f"[citation check] {problems} Fix the citations and give the full answer again."
+        for _ in range(CITATION_RETRIES):
+            if not (problems := self._citation_problems(answer)):
+                break
+            _trace("citation check failed:\n" + "\n".join(problems), RED)
+            self._append({"role": "user", "content": (
+                "[automatic check, not from the user] These citations don't resolve:\n- " + "\n- ".join(problems)
+                + "\nFix them, then repeat your previous answer in full with only those citations changed."
             )})
             answer = self._complete()
+        if problems := self._citation_problems(answer):
+            answer += "\n\n[warning] Unverified citations:\n- " + "\n- ".join(problems)
+        print(f"{DIM}[llm usage] this turn: {self.turn_usage}; session: {self.usage}{RESET}", file=sys.stderr, flush=True)
         changes = "\n".join(f"  - {c}" for c in self.memory_changes) or "  (none)"
         return f"{answer}\n\n[memory changes]\n{changes}"

@@ -66,6 +66,10 @@ def normalize(raw: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     vendors = raw["raw_vendors"].copy()
     vendor_by_account = dict(zip(vendors.account_number, vendors.vendor_name, strict=True))
     vendors["order_cutoff"] = None
+    # Set by a dated memory override: the value before the change and the date it took effect.
+    for field in ("delivery_days", "order_cutoff"):
+        vendors[f"previous_{field}"] = None
+        vendors[f"{field}_from"] = None
 
     # Map a SKU to a kitchen ingredient only on an exact name match. Anything else stays
     # unmapped (NULL) for the agent to resolve with evidence; pack size still comes from the catalog.
@@ -146,6 +150,7 @@ def add_chat_note(text: str, written_at: str, author: str = "user") -> str:
     return note_id
 
 
-def known_ids() -> set[str]:
+def id_tables() -> dict[str, str]:
+    """Every citable ID and the table it belongs to."""
     with connect() as con:
-        return {r[0] for r in con.execute("SELECT id FROM ids")}
+        return dict(con.execute("SELECT id, tbl FROM ids"))

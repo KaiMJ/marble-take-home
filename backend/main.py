@@ -6,7 +6,6 @@ import shutil
 import config
 import db
 import memory
-import snapshot
 from agent import Agent
 
 def _notes(where: str) -> list[tuple]:
@@ -33,25 +32,24 @@ def cmd_ingest_log(args: argparse.Namespace) -> None:
 
 def cmd_chat(args: argparse.Namespace) -> None:
     print("Ask a question or tell me something new. Ctrl-D to exit.")
-    with Agent("chat") as agent:
+    with Agent("chat", snapshot=True) as agent:
         try:
             while True:
-                if text := input("\n> ").strip():
+                if not (text := input("\n> ").strip()):
+                    continue
+                try:
                     note_id = db.add_chat_note(text, config.NOW_ISO)
                     print("\n" + agent.turn(f"[{note_id}] {text}"))
+                except Exception as e:  # one bad turn shouldn't end the session
+                    print(f"\n(error: {type(e).__name__}: {e}; ask again or try another question)")
         except (EOFError, KeyboardInterrupt):
             print()
 
 def cmd_brief(args: argparse.Namespace) -> None:
     notes = "\n".join(f"[{n} | {w} | {a}] {t}" for n, w, a, t in _notes("written_at >= '2026-09-28'"))
-    with Agent("brief") as agent:
-        brief = agent.turn(
-            "Write this morning's brief.\n\n"
-            "<snapshot>\nFixed queries over the records, computed before you started. Facts, not conclusions.\n\n"
-            f"{snapshot.build()}\n</snapshot>\n\n"
-            f"Notes from the past week:\n{notes}"
-        )
-    memory.write("/memories/briefs/2026-10-05.md",
+    with Agent("brief", snapshot=True) as agent:
+        brief = agent.turn(f"Write this morning's brief.\n\nNotes from the past week:\n{notes}")
+    memory.write("briefs/2026-10-05.md",
                  f"# Brief 2026-10-05\nsummary: morning brief for {config.NOW}\n\n{brief}",
                  "morning brief 2026-10-05")
     print(brief)
