@@ -34,13 +34,15 @@ SCHEMA = {
 
 TABLE_DESCRIPTIONS = {
     "purchases": "one row per invoice line; base_qty in base units (lb or each) via the catalog pack size; "
-                 "ingredient is empty where the SKU's description doesn't match a kitchen ingredient name",
-    "invoices": "one row per invoice; entered_status is typed by the office, not scanned at receiving",
+                 "ingredient is empty where the SKU's description doesn't match a kitchen ingredient name; "
+                 "overridden_by shows values changed by memory (data.md), raw_invoice_lines has the originals",
+    "invoices": "one row per invoice; entered_status is typed by the office, not scanned at receiving; "
+                "overridden_by shows memory corrections",
     "sales": "one row per POS item per day; days without sales of an item omit that item",
     "recipes": "ingredient quantity per portion, by menu item, with effective date",
     "counts": "physical inventory counts (opening and closing only)",
     "menu": "POS buttons, listed prices, planned availability",
-    "vendors": "vendor order sheet as supplied (dated; may be stale)",
+    "vendors": "vendor order sheet (dated Sep 14); overridden_by shows fields updated from memory",
     "catalog": "supplier SKUs, pack quantity and unit; ingredient set only on an exact name match, else empty",
     "notes": "shift notebook (source='log', N##) and chat messages (source='chat', U##)",
 }

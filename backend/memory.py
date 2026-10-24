@@ -38,7 +38,14 @@ SEED_FILES = {
     "data.md": (
         "# Data\n"
         "summary: how to read the records: SKU-to-ingredient links, corrections, known record problems\n\n"
-        "## Mappings\n\n## Corrections\n\n## Known issues\n"
+        "Lines in Mappings and Overrides change the data every query sees; delete a line to undo it.\n\n"
+        "## Mappings\n"
+        "Format: - map <SKU> -> <kitchen ingredient name> [sources]\n\n"
+        "## Overrides\n"
+        "Format: - set vendor <vendor_id> delivery_days|order_cutoff = <value> (optional: from YYYY-MM-DD) [sources]\n"
+        "Format: - set invoice <invoice_id> entered_status = <value> [sources]\n"
+        "Format: - set line <line_id> unit_price|quantity = <number> [sources]\n\n"
+        "## Known issues\n"
     ),
 }
 
@@ -47,23 +54,12 @@ SCHEMA = {
     "function": {
         "name": "memory",
         "description": (
-            "Your persistent notebook: markdown files under /memories, versioned (every change is kept). "
-            "Commands: view (a file, or a directory to list files with summaries; as_of reads a past version), "
-            "search (words or an ID), write (create or replace a whole file; empty content deletes), "
-            "edit (replace one exact snippet; view the file first to copy text exactly). "
-            "write and edit need a reason; if omitted, the source IDs cited in brackets in the new text are used.\n"
-            "Layout: open.md (## Questions, ## Todos, ## Hypotheses), vendors.md, ingredients.md, menu.md, "
-            "operations.md, data.md (## Mappings, ## Corrections, ## Known issues). Add entries under the "
-            "matching file and heading; create a new file only for a topic none of these fits. "
-            "Keep line 2 as 'summary: <one line>'.\n"
-            "Record what is true now, not a diary: notes are already stored and searchable, so don't copy them; "
-            "record what a note changes. Give each fact one home and update it in place when it changes. "
-            "Any follow-up ('need to', 'keep checking', 'not yet seen') becomes a todo or question in open.md; "
-            "a possible explanation becomes a hypothesis.\n"
-            "Entry format: '- <statement> from <date> [<source IDs>] (reported|observed|inferred)'. "
-            "Changed belief: '- ~~<old>~~ -> <new> [<source IDs>]'. "
-            "Hypothesis: '- (low|med|high) <claim> [<IDs>]. Confirm by: <what would settle it>'. "
-            "Todo/question: '- [ ] ...', closed as '- [x] ... [<source>]'."
+            "Read and edit your memory: markdown files under /memories. Every change is versioned. "
+            "view: a file, or a directory to list files with their summaries; as_of reads a past version. "
+            "search: find lines by words or an ID. "
+            "write: create or replace a whole file (empty content deletes it). "
+            "edit: replace one exact snippet; view the file first and copy the text exactly. "
+            "write and edit take a reason; if you leave it out, the source IDs cited in brackets in the new text are used."
         ),
         "parameters": {
             "type": "object",
@@ -226,8 +222,11 @@ def _reason(args: dict) -> str | None:
 
 
 def sync_checks(reason: str) -> str:
-    """Apply SKU mappings from data.md and refresh data-check questions in open.md."""
-    problems = checks.apply_mappings()
+    """Apply map/set lines from data.md to the data and refresh data-check questions in open.md."""
+    try:
+        problems = checks.apply_memory()
+    except Exception as e:  # never lose the memory write because applying it failed
+        problems = [f"data.md was saved but could not be applied to the data ({type(e).__name__}: {e})"]
     changes = checks.sync_open_questions()
     if changes:
         _commit(ROOT / "open.md", f"data checks: {', '.join(changes)} ({reason})")

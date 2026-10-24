@@ -38,13 +38,19 @@ TABLE_CITATION = re.compile(
     r"\[(?:sales|purchases|invoices|counts|recipes|menu|vendors|catalog|notes)(?:[ ,][^\[\]]*)?\]", re.I)
 
 
+VAGUE_CITATION = re.compile(r"\((?:[^()]*\b(?:query|queries|snapshot|table|data)\b[^()]*)\)", re.IGNORECASE)
+
+
 def _is_error(out: str) -> bool:
     return out.startswith("ERROR") or "<error>" in out
 
 
 def memory_block() -> str:
+    # Always loaded: the index, what's unresolved, and how to read the records. Topic files load on demand.
     open_items = (config.MEMORY_DIR / "open.md").read_text()
-    return f"MEMORY INDEX\n{memory.index()}\n\nOPEN (/memories/open.md)\n{open_items}"
+    data = (config.MEMORY_DIR / "data.md").read_text()
+    return (f"MEMORY INDEX\n{memory.index()}\n\nOPEN (/memories/open.md)\n{open_items}\n"
+            f"DATA (/memories/data.md)\n{data}")
 
 
 class Agent:
@@ -154,6 +160,10 @@ def _citation_problems(answer: str) -> str:
     if tables:
         problems.append(f"These cite a table, not a record: {', '.join(tables)}. Cite the row IDs "
                         "(e.g. POS-21-M05, INV-011-L02, COUNT-CLOSE-EGG).")
+    vague = sorted(set(VAGUE_CITATION.findall(answer)))
+    if vague:
+        problems.append(f"These name a source vaguely instead of citing rows: {', '.join(vague)}. "
+                        "Replace them with row IDs in square brackets.")
     return " ".join(problems)
 
 

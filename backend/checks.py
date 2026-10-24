@@ -1,14 +1,17 @@
 """Missing-label checks: records the data can't be interpreted without.
 
 The checks only detect gaps; they never fill them. Gaps become questions in /memories/open.md.
-An answer is recorded in /memories/data.md as '- map <SKU> -> <ingredient> [sources]' and
-applied to the database, so every later query sees it.
+Answers and corrections are recorded in /memories/data.md ('- map ...', '- set ...') and applied to
+the normalized tables (raw_* stay untouched), so every later query sees them with an overridden_by source.
 """
 
 import re
 import sqlite3
 
+import pandas as pd
+
 import config
+import db
 
 MAP_LINE = re.compile(r"^- map (\S+) -> (.+?)\s*\[(.+?)\]", re.M)
 TAG = "(data check: {key})"
@@ -43,23 +46,70 @@ def kitchen_ingredients(con: sqlite3.Connection) -> set[str]:
     return {r[0] for r in con.execute("SELECT ingredient FROM counts UNION SELECT ingredient FROM recipes")}
 
 
-def apply_mappings() -> list[str]:
-    """Apply '- map SKU -> ingredient' lines from data.md. Returns problems to report back to the agent."""
+SET_LINE = re.compile(r"^- set (vendor|invoice|line) (\S+) (\w+) = (.+?)(?: from (\d{4}-\d{2}-\d{2}))?\s*\[(.+?)\]",
+                      re.MULTILINE)
+# What memory may override, and where: kind -> (table, key column, allowed fields).
+OVERRIDES = {
+    "vendor": ("vendors", "vendor_id", {"delivery_days", "order_cutoff"}),
+    "invoice": ("invoices", "invoice_id", {"entered_status"}),
+    "line": ("purchases", "line_id", {"unit_price", "quantity"}),
+}
+
+
+def apply_memory() -> list[str]:
+    """Rebuild overridable tables from raw_* and apply '- map' and '- set' lines from data.md.
+
+    Returns problems to report back to the agent.
+    """
     path = config.MEMORY_DIR / "data.md"
     text = path.read_text() if path.exists() else ""
     problems = []
     with sqlite3.connect(config.DB_PATH) as con:
+        raw = {t: pd.read_sql_query(f"SELECT * FROM {t}", con) for t in db.RAW_FILES}
+        tables = db.normalize(raw)
         valid = kitchen_ingredients(con)
-        skus = {r[0] for r in con.execute("SELECT sku FROM catalog")}
-        for sku, ingredient, _ in MAP_LINE.findall(text):
-            if sku not in skus:
-                problems.append(f"mapping ignored: SKU {sku} is not in the catalog")
+
+        for sku, ingredient, sources in MAP_LINE.findall(text):
+            cat, pur = tables["catalog"], tables["purchases"]
+            if sku not in set(cat.sku):
+                problems.append(f"map ignored: SKU {sku} is not in the catalog")
             elif ingredient not in valid:
-                problems.append(f"mapping ignored: {ingredient!r} is not a kitchen ingredient. "
+                problems.append(f"map ignored: {ingredient!r} is not a kitchen ingredient. "
                                 f"Use one of: {'; '.join(sorted(valid))}")
             else:
-                con.execute("UPDATE catalog SET ingredient = ? WHERE sku = ?", (ingredient, sku))
-                con.execute("UPDATE purchases SET ingredient = ? WHERE sku = ?", (ingredient, sku))
+                for df in (cat, pur):
+                    df.loc[df.sku == sku, ["ingredient", "overridden_by"]] = [ingredient, sources]
+
+        for kind, key, field, value, start, sources in SET_LINE.findall(text):
+            table, key_col, fields = OVERRIDES[kind]
+            df = tables[table]
+            label = f"{sources}" + (f" (from {start})" if start else "")
+            if field not in fields:
+                problems.append(f"set ignored: {kind} field {field!r} can't be overridden. "
+                                f"Allowed: {', '.join(sorted(fields))}")
+            elif key not in set(df[key_col]):
+                problems.append(f"set ignored: {kind} {key} does not exist")
+            else:
+                rows = df[key_col] == key
+                if field in ("unit_price", "quantity"):
+                    try:
+                        value = float(value)
+                    except ValueError:
+                        problems.append(f"set ignored: {field} must be a number, got {value!r}")
+                        continue
+                df.loc[rows, [field, "overridden_by"]] = [value, label]
+                if kind == "invoice":
+                    pur = tables["purchases"]
+                    pur.loc[pur.invoice_id == key, [field, "overridden_by"]] = [value, label]
+                if kind == "line":
+                    r = df.loc[rows]
+                    base_qty = r.quantity.where(r.unit != "case", r.quantity * r.pack_quantity)
+                    df.loc[rows, "cost"] = r.quantity * r.unit_price
+                    df.loc[rows, "base_qty"] = base_qty
+                    df.loc[rows, "price_per_base"] = (df.loc[rows, "cost"] / base_qty).round(4)
+
+        for name in db.OVERRIDABLE:
+            tables[name].to_sql(name, con, index=False, if_exists="replace")
     return problems
 
 

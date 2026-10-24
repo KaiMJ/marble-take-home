@@ -78,21 +78,46 @@ def stock_vs_use(con: sqlite3.Connection) -> str:
 
 
 def price_changes(con: sqlite3.Connection) -> str:
-    df = _q(con, "SELECT sku, ingredient, delivery_date, price_per_base, base_unit, line_id FROM purchases "
-                 "ORDER BY sku, delivery_date")
+    df = _q(con, "SELECT sku, ingredient, delivery_date, price_per_base, base_unit, line_id, overridden_by "
+                 "FROM purchases ORDER BY sku, delivery_date")
     df["previous"] = df.groupby("sku").price_per_base.shift()
     changed = df[df.previous.notna() & (df.price_per_base != df.previous)]
     firsts = df.groupby("sku").head(1)
     lines = ["Price per base unit when it differs from the SKU's previous purchase:",
-             _table(changed[["sku", "ingredient", "delivery_date", "previous", "price_per_base", "base_unit", "line_id"]])
+             _table(changed[["sku", "ingredient", "delivery_date", "previous", "price_per_base", "base_unit", "line_id",
+                             "overridden_by"]].fillna(""))
              if len(changed) else "(none)",
              "\nFirst purchase price per SKU:",
              _table(firsts[["sku", "ingredient", "delivery_date", "price_per_base", "base_unit", "line_id"]])]
     return "\n".join(lines)
 
 
+def overrides(con: sqlite3.Connection) -> str:
+    """Values memory changed, with the source value, so corrections stay visible after they're applied."""
+    rows = []
+    for _, r in _q(con, """SELECT p.line_id AS id, p.unit_price, l.unit_price AS source_unit_price, p.quantity,
+                                  l.quantity AS source_quantity, p.ingredient, p.entered_status, p.overridden_by
+                           FROM purchases p JOIN raw_invoice_lines l ON l.row_id = p.line_id
+                           WHERE p.overridden_by IS NOT NULL""").iterrows():
+        changes = [f"{f} {r['source_' + f]} -> {r[f]}" for f in ("unit_price", "quantity") if r[f] != r["source_" + f]]
+        rows.append({"record": r.id, "change": "; ".join(changes) or f"ingredient={r.ingredient}, "
+                     f"status={r.entered_status}", "sources": r.overridden_by})
+    for _, r in _q(con, """SELECT i.invoice_id, h.status, i.entered_status, i.overridden_by FROM invoices i
+                           JOIN raw_invoice_headers h USING (invoice_id) WHERE i.overridden_by IS NOT NULL""").iterrows():
+        rows.append({"record": r.invoice_id, "change": f"entered_status {r.status} -> {r.entered_status}",
+                     "sources": r.overridden_by})
+    for _, r in _q(con, """SELECT v.vendor_id, w.delivery_days AS source_days, v.delivery_days, v.order_cutoff,
+                                  v.overridden_by FROM vendors v JOIN raw_vendors w USING (vendor_id)
+                           WHERE v.overridden_by IS NOT NULL""").iterrows():
+        cutoff = f"; order_cutoff {r.order_cutoff}" if pd.notna(r.order_cutoff) else ""
+        rows.append({"record": r.vendor_id, "change": f"delivery_days {r.source_days} -> {r.delivery_days}{cutoff}",
+                     "sources": r.overridden_by})
+    return _table(pd.DataFrame(rows)) if rows else "(none)"
+
+
 def vendor_sheet(con: sqlite3.Connection) -> str:
-    return _table(_q(con, "SELECT vendor_id, vendor_name, delivery_days, last_reviewed FROM vendors"))
+    df = _q(con, "SELECT vendor_id, vendor_name, delivery_days, order_cutoff, last_reviewed, overridden_by FROM vendors")
+    return _table(df.fillna(""))
 
 
 def build() -> str:
@@ -103,7 +128,8 @@ def build() -> str:
                 reconciliation(con),
             "Stock on hand vs average expected daily use, last 14 days": stock_vs_use(con),
             "Purchase prices": price_changes(con),
-            "Vendor order sheet as supplied (may be superseded by memory)": vendor_sheet(con),
+            "Vendor schedule (order sheet, with memory overrides shown in overridden_by)": vendor_sheet(con),
+            "Values overridden by memory (data.md), with the source value": overrides(con),
             "Missing labels (rows excluded from the figures above)":
                 "\n".join(f"- {g['summary']}" for g in find_gaps(con)) or "(none)",
         }

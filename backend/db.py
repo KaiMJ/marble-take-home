@@ -49,13 +49,14 @@ def parse_ops_log(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build() -> None:
-    config.VAR_DIR.mkdir(exist_ok=True)
-    config.DB_PATH.unlink(missing_ok=True)
-    raw = {name: pd.read_csv(config.DATA_DIR / f) for name, f in RAW_FILES.items()}
+# Tables rebuilt from raw_* whenever memory overrides change, so removing an override restores the source value.
+OVERRIDABLE = ("vendors", "catalog", "invoices", "purchases")
 
-    vendors = raw["raw_vendors"]
+
+def normalize(raw: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    vendors = raw["raw_vendors"].copy()
     vendor_by_account = dict(zip(vendors.account_number, vendors.vendor_name))
+    vendors["order_cutoff"] = None
 
     # Map a SKU to a kitchen ingredient only on an exact name match. Anything else stays
     # unmapped (NULL) for the agent to resolve with evidence; pack size still comes from the catalog.
@@ -71,16 +72,31 @@ def build() -> None:
         invoices[["invoice_id", "vendor", "invoice_date", "delivery_date", "entered_status"]], on="invoice_id"
     )
     lines = lines.merge(catalog[["sku", "ingredient", "pack_quantity", "pack_unit"]], on="sku", how="left")
+    lines["week"] = _week(lines.delivery_date)
+    purchases = recompute(lines.rename(columns={"row_id": "line_id", "line_total": "cost"}))[
+        ["delivery_date", "invoice_date", "week", "vendor", "ingredient", "sku", "item_description",
+         "quantity", "unit", "unit_price", "pack_quantity", "base_qty", "base_unit", "cost", "price_per_base",
+         "entered_status", "invoice_id", "line_id"]
+    ]
+    for df in (vendors, catalog, invoices, purchases):
+        df["overridden_by"] = None
+    return {"vendors": vendors, "catalog": catalog, "invoices": invoices, "purchases": purchases}
+
+
+def recompute(lines: pd.DataFrame) -> pd.DataFrame:
+    """Base-unit quantity and price from quantity, unit, and pack size."""
+    lines = lines.copy()
     is_case = lines.unit == "case"
     lines["base_qty"] = lines.quantity.where(~is_case, lines.quantity * lines.pack_quantity)
     lines["base_unit"] = lines.pack_unit.where(is_case, lines.unit)
-    lines["price_per_base"] = (lines.line_total / lines.base_qty).round(4)
-    lines["week"] = _week(lines.delivery_date)
-    purchases = lines.rename(columns={"row_id": "line_id", "line_total": "cost"})[
-        ["delivery_date", "invoice_date", "week", "vendor", "ingredient", "sku", "item_description",
-         "quantity", "unit", "unit_price", "base_qty", "base_unit", "cost", "price_per_base",
-         "entered_status", "invoice_id", "line_id"]
-    ]
+    lines["price_per_base"] = (lines.cost / lines.base_qty).round(4)
+    return lines
+
+
+def build() -> None:
+    config.VAR_DIR.mkdir(exist_ok=True)
+    config.DB_PATH.unlink(missing_ok=True)
+    raw = {name: pd.read_csv(config.DATA_DIR / f) for name, f in RAW_FILES.items()}
 
     sales = raw["raw_pos_daily"].rename(columns={"business_date": "date", "pos_item_id": "item_id",
                                                  "item_name": "item", "quantity_sold": "qty"})
@@ -94,14 +110,11 @@ def build() -> None:
 
     tables = {
         **raw,
-        "purchases": purchases,
-        "invoices": invoices,
+        **normalize(raw),
         "sales": sales,
         "recipes": recipes,
         "counts": counts,
         "menu": menu,
-        "vendors": vendors,
-        "catalog": catalog,
         "notes": notes,
     }
     with sqlite3.connect(config.DB_PATH) as con:
@@ -109,7 +122,7 @@ def build() -> None:
             df.to_sql(name, con, index=False)
         ids = pd.concat(
             [pd.DataFrame({"id": tables[t][c], "tbl": t}) for t, c in ID_COLUMNS.items()]
-            + [pd.DataFrame({"id": catalog.sku, "tbl": "catalog"})]
+            + [pd.DataFrame({"id": tables["catalog"].sku, "tbl": "catalog"})]
         )
         ids.drop_duplicates("id").to_sql("ids", con, index=False)
 
