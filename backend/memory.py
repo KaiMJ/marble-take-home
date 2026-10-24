@@ -1,0 +1,249 @@
+"""`memory` tool: memory.md plus archived briefs, versioned with git (one commit per write)."""
+
+import difflib
+import re
+import subprocess
+from pathlib import Path
+
+import checks
+import config
+
+ROOT = config.MEMORY_DIR
+
+# One file, loaded whole into every prompt. Fixed sections so related facts land in the same place.
+MAIN = "memory.md"
+SEED = (
+    "# Memory\n"
+    "summary: everything the agent keeps across sessions\n\n"
+    "## Vendors\n"
+    "Delivery days, order cutoffs, vendor-reported changes.\n\n"
+    "## Ingredients\n"
+    "Prices, pack sizes, supply status.\n\n"
+    "## Menu\n"
+    "Items, portions, launches, demand patterns.\n\n"
+    "## Operations\n"
+    "Equipment, staff, waste, receiving, upcoming events.\n\n"
+    "## Open\n"
+    "### Questions\n\n### Todos\n\n### Hypotheses\n\n"
+    "## Data\n"
+    "Map and set lines change the data every query sees; delete a line to undo it.\n\n"
+    "### Mappings\n"
+    "Format: - map <SKU> -> <kitchen ingredient name> [sources]\n\n"
+    "### Overrides\n"
+    "Format: - set vendor <vendor_id> delivery_days|order_cutoff = <value> (optional: from YYYY-MM-DD) [sources]\n"
+    "Format: - set invoice <invoice_id> entered_status = <value> [sources]\n"
+    "Format: - set line <line_id> unit_price|quantity = <number> [sources]\n\n"
+    "### Known issues\n"
+)
+
+SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "memory",
+        "description": (
+            "Read and edit your memory: memory.md (shown in full in the prompt; the default path) plus past "
+            "briefs under briefs/. Every change is versioned. "
+            "view: a file, or a directory to list files; as_of reads a past version. "
+            "search: find lines by words or an ID. "
+            "write: create or replace a whole file (empty content deletes it). "
+            "edit: replace one exact snippet; view the file first and copy the text exactly. "
+            "write and edit take a reason; if you leave it out, the source IDs cited in brackets in the new text are used."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "enum": ["view", "search", "write", "edit"]},
+                "path": {"type": "string", "description": "default memory.md; briefs/<date>.md for past briefs; . lists files"},
+                "content": {"type": "string", "description": "write: full file content; empty string deletes"},
+                "old": {"type": "string", "description": "edit: exact text to replace (must occur once)"},
+                "new": {"type": "string", "description": "edit: replacement text"},
+                "query": {"type": "string", "description": "search: words or an ID"},
+                "as_of": {"type": "string", "description": "view: ISO datetime; read the version at that time"},
+                "reason": {"type": "string", "description": "write/edit: why, with source IDs (defaults to the IDs cited in the new text)"},
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+
+class MemoryToolError(Exception):
+    """A failed command. The message tells the model what happened and how to fix it."""
+
+
+def _fail(what: str, fix: str) -> MemoryToolError:
+    return MemoryToolError(f"ERROR: {what}\nNothing was saved.\nFix: {fix}")
+
+
+def _git(*args: str) -> str:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+
+
+def init() -> None:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if not (ROOT / ".git").exists():
+        _git("init", "-q")
+        _git("config", "user.name", "ops-agent")
+        _git("config", "user.email", "ops-agent@localhost")
+        (ROOT / MAIN).write_text(SEED)
+        _git("add", "-A")
+        _git("commit", "-qm", "init memory layout")
+
+
+def _files() -> list[Path]:
+    return sorted(f for f in ROOT.rglob("*.md") if ".git" not in f.parts)
+
+
+def _resolve(path: str) -> Path:
+    """Paths are relative to the memory folder: memory.md, briefs/2026-10-05.md; '.' is the folder."""
+    p = (ROOT / path.lstrip("/")).resolve()
+    if p != ROOT.resolve() and ROOT.resolve() not in p.parents:
+        raise _fail(f"path {path!r} is outside memory.", f"use {MAIN}.")
+    return p
+
+
+def _rel(p: Path) -> str:
+    return str(p.relative_to(ROOT))
+
+
+def _existing() -> str:
+    return ", ".join(_rel(f) for f in _files())
+
+
+def _commit(p: Path, reason: str) -> str:
+    _git("add", "-A", "--", _rel(p))
+    _git("commit", "-qm", reason, "--allow-empty")
+    return _git("rev-parse", "--short", "HEAD").strip()
+
+
+def index() -> str:
+    lines = []
+    for f in _files():
+        summary = next((ln[8:].strip() for ln in f.read_text().splitlines() if ln.startswith("summary:")), "")
+        changed = _git("log", "-1", "--format=%cs", "--", _rel(f)).strip()
+        lines.append(f"{_rel(f)} ({changed}): {summary}")
+    return "\n".join(lines) or "(empty)"
+
+
+def view(path: str, as_of: str | None = None) -> str:
+    p = _resolve(path)
+    if as_of:
+        rev = _git("rev-list", "-1", f"--before={as_of}", "HEAD").strip()
+        if not rev:
+            raise MemoryToolError(f"ERROR: no memory existed before {as_of}.\nFix: use a later as_of, or omit it.")
+        try:
+            text = _git("show", f"{rev}:{_rel(p)}")
+        except subprocess.CalledProcessError as e:
+            raise MemoryToolError(f"ERROR: {path} did not exist at {as_of}.\nFix: omit as_of to read the current version.") from e
+    elif p.is_dir():
+        if p == ROOT.resolve():
+            return index()
+        return "\n".join(ln for ln in index().splitlines() if ln.startswith(path.rstrip("/") + "/")) or "(empty)"
+    elif p.exists():
+        text = p.read_text()
+    else:
+        raise MemoryToolError(f"ERROR: {path} does not exist.\nExisting files: {_existing()}")
+    return "\n".join(f"{i:4} {ln}" for i, ln in enumerate(text.splitlines(), 1))
+
+
+def search(query: str) -> str:
+    terms = query.lower().split()
+    hits = []
+    for f in sorted(_files(), key=lambda f: f.stat().st_mtime, reverse=True):
+        lines = f.read_text().splitlines()
+        for i, ln in enumerate(lines):
+            if all(t in ln.lower() for t in terms):
+                ctx = lines[max(0, i - 1): i + 2]
+                hits.append(f"{_rel(f)}:{i + 1}\n  " + "\n  ".join(ctx))
+                if len(hits) == 20:
+                    return "\n".join(hits)
+    return "\n".join(hits) or f"No matches for {query!r}. Try fewer or different words."
+
+
+def write(path: str, content: str, reason: str) -> str:
+    p = _resolve(path)
+    if p.suffix != ".md":
+        raise _fail(f"{path} is not a .md file.", "end the path with .md.")
+    if not content:
+        if not p.exists():
+            raise _fail(f"cannot delete {path}: it does not exist.", f"existing files: {_existing()}")
+        p.unlink()
+        return f"OK deleted {path} (commit {_commit(p, reason)})"
+    existed = p.exists()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content if content.endswith("\n") else content + "\n")
+    verb = "replaced" if existed else "created"
+    return f"OK {verb} {path} (commit {_commit(p, reason)})"
+
+
+def edit(path: str, old: str, new: str, reason: str) -> str:
+    p = _resolve(path)
+    if not p.exists():
+        raise _fail(f"{path} does not exist.", f"use write to create it, or pick one of: {_existing()}")
+    text = p.read_text()
+    n = text.count(old)
+    if n == 0:
+        close = difflib.get_close_matches(old.strip(), text.splitlines(), n=1, cutoff=0.4)
+        hint = f"closest line is {close[0]!r}; " if close else ""
+        raise _fail(f"'old' text was not found in {path}.",
+                    f"{hint}view the file and copy the text exactly (without line numbers).")
+    if n > 1:
+        raise _fail(f"'old' text occurs {n} times in {path}.", "include more surrounding text so it matches once.")
+    p.write_text(text.replace(old, new))
+    sha = _commit(p, reason)
+    diff = "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0))
+    return f"OK edited {path} (commit {sha})\n{diff}"
+
+
+CITATION = re.compile(r"\[([^\[\]]+)\]")
+
+def reason(args: dict) -> str | None:
+    """The given reason, or else the sources cited in the new text (e.g. '[N03, INV-013-L01]')."""
+    if args.get("reason"):
+        return args["reason"]
+    # Skip markdown checkboxes ("- [ ]", "- [x]"), which the bracket pattern also matches.
+    cited = [c for c in CITATION.findall(args.get("new") or args.get("content") or "") if c.strip() not in ("", "x")]
+    return f"sources: {', '.join(cited)}" if cited else None
+
+def sync_checks(reason: str) -> str:
+    """Apply map/set lines to the data and refresh data-check questions under Open."""
+    try:
+        problems = checks.apply_memory()
+    except Exception as e:  # never lose the memory write because applying it failed
+        problems = [f"memory was saved but could not be applied to the data ({type(e).__name__}: {e})"]
+    changes = checks.sync_open_questions()
+    if changes:
+        _commit(ROOT / MAIN, f"data checks: {', '.join(changes)} ({reason})")
+    return "\n".join([f"data check: {c}" for c in changes] + [f"WARNING: {p}" for p in problems])
+
+# command -> (handler, required args)
+COMMANDS = {
+    "view": (lambda a: view(a["path"], a.get("as_of")), ["path"]),
+    "search": (lambda a: search(a["query"]), ["query"]),
+    "write": (lambda a: write(a["path"], a["content"], a["reason"]), ["path", "content"]),
+    "edit": (lambda a: edit(a["path"], a["old"], a["new"], a["reason"]), ["path", "old", "new"]),
+}
+
+def run(args: dict) -> str:
+    cmd = args.get("command")
+    if cmd not in COMMANDS:
+        return f"ERROR: unknown command {cmd!r}.\nFix: use one of view, search, write, edit."
+    handler, required = COMMANDS[cmd]
+    if cmd != "search" and not args.get("path"):
+        args = {**args, "path": MAIN}
+    writes = cmd in ("write", "edit")
+    if missing := [k for k in required if args.get(k) is None]:
+        saving = "\nNothing was saved." if writes else ""
+        return f"ERROR: {cmd} is missing {', '.join(missing)}.{saving}\nFix: call again with {', '.join(missing)}."
+    if writes:
+        args = {**args, "reason": reason(args)}
+        if not args["reason"]:
+            return (f"ERROR: {cmd} has no reason and the new text cites no sources.\nNothing was saved.\n"
+                    "Fix: add a reason, or cite source IDs in brackets in the text, e.g. [N03, INV-013-L01].")
+    try:
+        out = handler(args)
+    except MemoryToolError as e:
+        return str(e)
+    if writes and args["path"].rstrip("/").endswith(MAIN) and (extra := sync_checks(args["reason"])):
+        out = f"{out}\n{extra}"
+    return out

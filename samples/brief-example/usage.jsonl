@@ -1,0 +1,14 @@
+{"model": "xai/grok-4.7", "prompt_tokens": 9359, "completion_tokens": 1486, "cost": 0.02437}
+{"model": "xai/grok-4.7", "prompt_tokens": 12847, "completion_tokens": 2994, "cost": 0.029642}
+{"model": "xai/grok-4.7", "prompt_tokens": 17344, "completion_tokens": 193, "cost": 0.016646}
+{"model": "xai/grok-4.7", "prompt_tokens": 20660, "completion_tokens": 307, "cost": 0.017242}
+{"model": "xai/grok-4.7", "prompt_tokens": 22892, "completion_tokens": 955, "cost": 0.020602}
+{"model": "xai/grok-4.7", "prompt_tokens": 24747, "completion_tokens": 82, "cost": 0.01581}
+{"model": "xai/grok-4.7", "prompt_tokens": 25150, "completion_tokens": 461, "cost": 0.01601}
+{"model": "xai/grok-4.7", "prompt_tokens": 26383, "completion_tokens": 748, "cost": 0.019622}
+{"model": "xai/grok-4.7", "prompt_tokens": 28308, "completion_tokens": 790, "cost": 0.021804}
+{"model": "xai/grok-4.7", "prompt_tokens": 29767, "completion_tokens": 307, "cost": 0.018944}
+{"model": "xai/grok-4.7", "prompt_tokens": 30677, "completion_tokens": 360, "cost": 0.01897}
+{"model": "xai/grok-4.7", "prompt_tokens": 31396, "completion_tokens": 954, "cost": 0.065252}
+{"model": "xai/grok-4.7", "prompt_tokens": 32906, "completion_tokens": 1186, "cost": 0.062176}
+{"model": "xai/grok-4.7", "prompt_tokens": 34285, "completion_tokens": 1532, "cost": 0.028418}
