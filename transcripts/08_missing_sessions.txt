@@ -1,0 +1,6 @@
+Used cursor for "refactor(memory): simplify to one file, organize snapshots, more flexible citation feedback, and add llm cost"
+
+After noticing some strict citation responses from tool outputs.
+
+
+Some other sessions for validating output of the briefs / ingest-logs.

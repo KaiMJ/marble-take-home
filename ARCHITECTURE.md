@@ -1,60 +1,55 @@
 # Architecture
 
-## Shape
+## Overview
 
-One tool-using loop (`agent.py`), two tools, two stores.
+1. Built a harness that updates memory in a file (memory.md).
+2. Used python sessions as a tool for maximum flexibility and features.
+3. Added table schemas / memory file as references that agent can search.
+4. Added pre/post processing steps: citation regex id checks / missing_recpies (just one example), and snapshots context in system prompt (Adding to user message instead of system prompt could potentially cache tokens if snapshots change frequently).
+
+## Entry points and chat agent
+
+![Entry points: GM logs, interactive chat, and brief feed the chat agent](docs/architecture_1.png)
+
+Used one agent with different context loaded depending on specific role.
+
+GM Logs: focuses on updating memory
+Interactive chat: Dynamic chat + subagent pattern for analysis.
+Briefs: focuses on top 5 issues and looks at memory + database.
+
+Agent gets exploratory behavior (backend/prompts.py), table query tools (@backend/workspace.py:34), memory tools (@backend/memory.py:39 ).
+Cleanup was not implemented to focus on recall, but system is designed so cleanup can be implemented in a separate agent or sequential pipeline.
+
+## Internals: agent, Python session, memory, and database
+
+![Internals: chat agent, memory repo, Python session, SQLite, citation check, and reply](docs/architecture_2.png)
+
+Used Python session to leverage "claude code/codex"-like capabilities for querying / aggregating / analyzing. Additional work around sandbox as tool_call guardrails was skipped.
+
+Added some hooks (descriptive function_call error messages, citation regex checks) were added, allowing agents to make more llm_calls for greater alignment.
+
+Memory / database is updated through tool_call. "markdown set/map --> parse --> sync".
+
+Sturctured operations (like callback or tool_call) is more ideal, but aimed to get it working within the time window.
+
+Example 'sync' command that is saved in memory.md:
 
 ```
-entry (ingest-log | chat | brief+snapshot)
-  → system prompt rebuilt each step: rules + mode + now + schema + memory
-  → LLM ⇄ tools (≤25 steps)
-       python  — read-only pandas/SQL session over the records
-       memory  — markdown files in a git repo
-  → citation check (up to 2 corrective passes, then a visible warning)
-  → answer + confirmed memory changes
+### Mappings
+Format: - map <SKU> -> <kitchen ingredient name> [sources]
+- map AW-CHK20 -> Chicken thigh boneless skinless [N03, N11, CAT-CHICKEN20]
+
+### Overrides
+Format: - set vendor <vendor_id> delivery_days|order_cutoff = <value> (optional: from YYYY-MM-DD) [sources]
+Format: - set invoice <invoice_id> entered_status = <value> [sources]
 ```
 
-| Choice | Why |
-| --- | --- |
-| SQLite + pandas sandbox, model writes its own queries | Questions are open-ended; fixed tools would cap what it can investigate. Read-only DB, subprocess, 30s timeout. |
-| Fixed snapshot in chat and brief (`snapshot.py`) | Anything the operator always needs is computed by code: anomaly checks (price outliers, header vs line totals, received-but-future, off-schedule deliveries), stock coverage to the next two deliveries with order quantities, reconciliation, prices. The model ranks, explains and digs; it doesn't have to discover the basics. Not shown during log replay, which runs in the past. |
-| Citation check on every answer | Only checks what code can verify: every cited ID exists. Whether the claim matches the row is left to evaluation (below), not regex heuristics. |
-| Tool errors return a `Fix:` hint | Cheaper models recover in one step instead of looping. |
-| litellm | Model-agnostic; swap via `LLM_MODEL`. |
+## Production Failures
 
-## Memory
+1. I added specific columns like order_cutoff, previous_delivery_days, etc.. and added checks of missing_recepie mappings that fit to the issues in this dataset.
+2. If some issues are not resolved by users, or there are contradictions in data, snapshots / briefs can provide 'lack of context' outputs.
+3. Currently, there is no deletion of memories. Some irrelevant notes are added by the agents.
+4. Snapshot calculations need to be reviewed / evaluated in depth to not miss any critical issues.
+5. LLM / tool_call optimization: potentially with subagents / removing traces for multi-turn api call.
 
-**Retained:** what the records can't tell a future session — vendor-reported changes, readings of the records (which ingredient a SKU is), corrections, open questions and hypotheses. Not retained: copies of notes or numbers a query can recompute.
-
-**Layout:** one file, `memory.md`, with fixed sections (Vendors, Ingredients, Menu, Operations, Open, Data), loaded whole into every prompt. One file means no index to navigate and no read calls; it stays small because records and notes are never copied in. Past briefs are archived under `briefs/` and not loaded.
-
-**Changing facts:** one fact lives in one place and is edited in place. The old value is struck through with a pointer to the new one and its source (`~~Mon/Thu [V1]~~ → Mon/Wed from 2026-09-28 [N09]`). Every write is a git commit with a reason; `view as_of=<time>` reads memory as it was. A dated vendor override keeps the previous value for earlier dates, so Thursday deliveries before Sept 28 still check as on schedule.
-
-**Corrections change the data:** Data section lines (`- map AW-CHK20 -> Chicken… [N11]`, `- set invoice INV-099 entered_status = … [N15]`) are applied to normalized tables after every write, tagged `overridden_by`. `raw_*` tables are never touched. Deleting the line undoes it.
-
-**Invalidated / forgotten:** data checks open a question under Open for each unlabeled SKU or recipe-less item and close it automatically when the gap is resolved. Superseded beliefs stay visible but struck. Nothing is deleted silently; nothing expires on its own (see gaps).
-
-**Replay:** `ingest-log` runs each note at its own timestamp and hides later notes, so memory is built as it would have been live. The N13 → N14 egg-hold reversal is the conflict test.
-
-## Left out
-
-- Order placement or vendor contact (advice only, per brief)
-- Web UI, auth, multi-site
-- Automatic expiry of memory facts
-- Demand forecasting beyond weekday averages (the Oct 10 brunch spike is left to the model and the GM)
-
-## Production failures and how to test
-
-**Likely failures**
-- *Confident wrong numbers:* model writes a bad query (unit mix-up, wrong join) and cites real IDs. The citation check proves the IDs exist, not that the arithmetic is right.
-- *Memory drift:* wrong correction in the Data section silently changes every later query. Mitigated by `overridden_by` and the snapshot's overrides table, not prevented.
-- *Stale facts:* nothing ages out; a vendor schedule from months ago reads as current.
-- *Bad source data accepted:* typos (INV-010-L01 at 10× price), office-entered "received" status (INV-099), case-size changes (AW-CHK20).
-- *Prompt growth:* memory block grows with every session.
-- *Model swap regressions:* behavior depends on model; litellm makes swapping easy, not safe.
-
-**Testing usefulness and trust**
-- Golden set from this packet: each planted issue (price typo, 20 lb case, route change, phantom delivery, egg-hold reversal, missing M99 recipe, walk-in loss) with the expected finding. Score recall and false alarms per model.
-- Numeric checks: compare the agent's figures with hand-computed answers for 10 questions.
-- Memory tests: replay the log, then assert on the Data and Open sections and that superseded facts are struck, not lost.
-- In production: did Maya act on the brief items, and how often did she correct the agent? Track corrections per week as the trust metric.
+Will need some iterations / domain knowledge to restructure the schemas.

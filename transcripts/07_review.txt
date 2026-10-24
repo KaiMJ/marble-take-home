@@ -1,0 +1,444 @@
+ ▐▛███▛█   Claude Code v2.1.310
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Work/Marble_Founding_Engineer_Take_Home/backend/data/runs
+
+
+❯ based on the data/* and docs/GM_OPS_LOG.md                                    
+                                                                                
+  what do you think are the hidden issues?                                      
+
+  Searched for 1 pattern, read 8 files, ran 2 shell commands (ctrl+o to expand)
+
+⏺ Main finding: the books don't reconcile cleanly, and a few items look like
+  data-entry errors or unverified receipts. Numbers below come from my script
+  over data/*, plus GM_OPS_LOG.md.
+
+  Likely errors in invoices (check before paying)
+
+  1. INV-010 pepper price is 10x. V2-PEPPER at $210.00/case, vs $21.00 on every
+     other pepper invoice. Overcharge about $378. Invoice total ($458.40)
+     carries the typo.
+  2. INV-009 header doesn't match lines. Header $395.35, lines sum $347.85.
+     $47.50 gap. Tax and delivery fee are both 0.00, so it's not explained by
+     those.
+  3. INV-099 looks phantom or premature. Marked received, but delivery is 10/6,
+     after the 10/4 closing count. Log N15 says "I have not seen the cases."
+     Also out of ID sequence, invoiced on a Sunday, and delivered on a Tuesday
+     (not an Alder day under either schedule). If it's in cost totals, they're
+     overstated.
+
+  Chicken: the biggest hidden gap
+
+  4. New 20 lb SKU splits chicken into two ingredients. AW-CHK20 ("Bnls thigh /
+     skin off 2 x 10lb") is a different SKU and description from V1-CHICKEN.
+     Joining on description undercounts by 220 lb. Once combined: 580 lb bought,
+     theoretical use 519 lb, actual 564 lb. About 45 lb (~$165 at $3.65)
+     unexplained.
+  5. Spoilage is probably part of that gap, but it isn't recorded. N06 (9/22):
+     unweighed chicken tray tossed, "No waste sheet filled out yet." There is no
+     waste table in data/.
+  6. "Same spec" is unverified. N03 says same spec, but the catalog describes a
+     different pack and cut ("skin off"). Price up 14% ($3.20 → $3.65/lb), and
+     the menu hasn't changed.
+
+  Stale or inconsistent master data
+
+  7. vendors.csv is out of date. Alder still says Mon/Thu, last reviewed 9/14.
+     Deliveries have been Mon/Wed since 9/28.
+  8. Vendor name variants. "ALDER WHOLESALE LLC" vs "Alder Wholesale" on the
+     same account (AC-417). Group by account, not name.
+  9. Mixed units. INV-007 bills chicken per lb at $3.20. Everything else is per
+     case. Needs normalizing before costing.
+  10. Weekend special has no recipe. M99 sold 32 units across 4 weekends. N04
+      says "need to remember to write the recipe down," still not done. Its
+      ingredient cost is invisible. Also, the till button went live 9/20, but
+      POS and menu start 9/26.
+
+  Data provenance
+
+  11. Variances are suspiciously exact. Rice, beans, eggs, oil, and avocado all
+      match theoretical use to 0.00. Hand counts of bulk dry goods don't usually
+      land that clean. Either the closing counts were derived from recipes, or
+      the usage math is circular. Ask how the close counts were taken before
+      trusting any variance analysis.
+  12. Theoretical usage ignores real portions. N10: "Nobody wrote down
+      portions." Breakfast-taco egg usage matches recipe exactly, which is
+      itself suspicious.
+  13. Data stops 10/4. Today is 10/24. No invoices, counts, or POS for three
+      weeks. Can't confirm current route, prices, or whether breakfast still
+      runs.
+
+  Ops risk from log
+
+  14. Thursday Alder delivery is gone. Since 9/28, Alder is Mon/Wed only.
+      Weekend breakfast (Sat/Sun 10–2) runs off Wednesday stock, plus Juniper on
+      Fridays. N09 flagged this. N10 says breakfast was busier than expected.
+      Stockout risk on weekends.
+
+  Suggested next steps
+
+  - Confirm INV-010 price and INV-009 gap with Juniper and Copper Pantry before
+    payment. Get a written answer on INV-099 status.
+  - Add a vendor_id to invoice and catalog joins, and map AW-CHK20 to the same
+    ingredient or create a distinct one on purpose.
+  - Add a waste log table and get the M99 recipe.
+  - Ask how the 10/4 close counts were taken.
+
+  I haven't changed any files. Want me to write the reconciliation script to a
+  file in the repo, or draft a vendor query?
+
+✻ Cooked for 1m 10s · done 1:03 AM
+
+※ recap: We're reviewing `data/*` and `docs/GM_OPS_LOG.md` for hidden issues, and I've reported them. The next step is to confirm the INV-010 pepper price and the INV-009 $47.50 gap with the vendors before paying. (disable recaps in /config)
+
+❯ **Monday brief — 2026-10-05.** Three items can take food off the menu this    
+  week. Nothing from Copper Pantry is on the way, and the chicken the office    
+  marked received is not here.                                                  
+                                                                                
+  **1. Tortillas and beans run out Wednesday unless Copper adds them to today's 
+  truck.** On hand at last night's count: 280 tortillas and 27.94 lb beans      
+  [COUNT-CLOSE-TORTILLA, COUNT-CLOSE-BEANS]. At recent weekday use that is      
+  about two days, and both are short before the next Copper delivery on Monday  
+  10-12: tortillas short 944.5, beans short 55.9 lb [snapshot: stock coverage]. 
+  Rice is the same vendor but lasts until Friday (42.84 lb on hand, short 23.5  
+  lb before 10-12) [COUNT-CLOSE-RICE, snapshot: stock coverage]. Copper         
+  delivers Mondays only, and the cutoff on the sheet is blank [V3]. The last    
+  three Mondays each brought rice, beans, and tortillas, and there is no        
+  invoice for today [INV-003, INV-009, INV-015], so this morning's truck may    
+  already be closed. Call Copper before the truck leaves and ask them to add to 
+  today's divery: about 4 cases of tortillas (240 each) and 5 cases of beans    
+  (12 lb) to cover this week, plus the usual week ahead (another 5 tortilla     
+  cases, 7 bean cases, 3 rice cases — that is what they have been sending, and  
+  it matches a week's use) [INV-015, snapshot: stock coverage]. If the truck is 
+  already gone, the next drop is Monday 10-12 and tacos, quesadillas, and       
+  bowls run short from Wednesday. I am confident on the shortage; I cannot tell 
+  whether today's order window is still open.                                   
+                                                                                
+  **2. Chicken is not covered for Wednesday, and the "received" order is not on 
+  site.** Last night's count was 47.9 lb, about two weekday days of use, and    
+  it runs out Thursday if nothing arrives [COUNT-CLOSE-CHICKEN, snapshot: stock 
+  coverage]. INV-099 is 2 cases / 40 lb of AW-CHK20 dated Tuesday 10-06, which  
+  the office entered as received [INV-099-L01]. Maya has not seen the cases,    
+  Tuesday is not an Alder day, and those 40 lb were not in the count [N15, N09, 
+  COUNT-CLOSE-CHICKEN]. Do not treat them as inbound. Sunday's noon cutf for a  
+  Monday drop has already passed. Next real Alder day is Wednesday 10-07, and   
+  the order is due **noon tomorrow, Tuesday 10-06** [V1, N09]. Order about 83   
+  lb for that delivery — 5 cases of the new 20 lb size, not the old 40 lb case  
+  — to last until Monday 10-12 [snapshot: stock coverage] [N11]. Also ask the   
+  office whether INV-099 is a real Tuesday exception or a mis-dated Wednesday   
+  order, and have someone look for the cases tomorrow before assuming they will 
+  not come. Confident the 40 lb is not here; the 5-case figure assumes this     
+  week looks like the last two.                                                 
+                                                                                
+  **3. Eggs and cheese go on the same Tuesday-noon Alder order.** Eggs: 84 on   
+  hand, used only on weekends, and they run out Saturday [COUNT-CLOSE-EGG,      
+  snapshot: stock coverage]. One case (180) on Wednesday, plus the 84 already   
+  here, covers this weekend exactly, with no spare [snapshot: stock coverage]   
+  [CAT-EGG]. Cheese: 14.68 lb, runs out Thursday, not short before Wednesday,   
+  but order 25.2 lb (3 cases of 10 lb) so Wednesday lasts until Monday 2        
+  [COUNT-CLOSE-CHEESE, snapshot: stock coverage]. Deadline for both is **noon   
+  Tuesday 10-06** [V1]. Eggs are not on hold — Maya confirmed that Saturday was 
+  another account's problem, and tacos sold 66 Saturday and 70 Sunday [N14,     
+  POS-20-M05, POS-21-M05].                                                      
+                                                                                
+  **Not today.** Peppers and avocado last through Wednesday's Juniper drop, and 
+  the "order 0.1 lb of peppers" figure is noise, not a buy [snapshot: stock     
+  coverage] [V2]. Juniper's cutoff is also blank, so confirm by Tuesday whether 
+  Friday's peppers and avocado need to be ordered a day ahead. Oil is fine      
+  into late October [snapshot: stock coverage]. Theo's busier brunch on         
+  Saturday 10-10 has no booking numbers, so do not pad this week's order for    
+  it; the eggs for that Saturday come off Monday 10-12's truck, ordered by noon 
+  Sunday [N15, V1].                                                             
+                                                                                
+  **Could not assess.** Copper's cutoff, so I don't know if item 1 can still    
+  ride today's truck [V3]. Juniper's cutoff, same gap, but it does not change a 
+  decision before tomorrow [V2]. The Weekend special still has no repe (32      
+  sold over two weekends), so the coverage numbers above do not include         
+  whatever went on those plates [POS-13-M99 to POS-21-M99, N10]. INV-010's      
+  pepper case at $210 looks like a ten-times keying error — the next delivery   
+  is $21 again, and the pepper count still balances — but I have not seen the   
+  paper invoice, so I am not correcting the price [INV-010-L01, INV-012-L01].   
+  INV-009's header is still $47.50 over its lines; that does not change today's 
+  order.                                                                        
+                                                                                
+  [memory changes]                                                              
+    - OK edited memory.md (commit 2570b10): N15, N09, COUNT-CLOSE-CHICKEN, V1   
+    - OK edited memory.md (commit 8d5b87b): V3, INV-003, INV-009, INV-015       
+    - OK edited memory.md (commit d08df1a): sources: INV-009, INV-003-L04,      
+  INV-015-L04, COUNT-OPEN-OIL, COUNT-CLOSE-OIL, INV-012-L01, INV-010-L01,       
+  INV-012-L01                                                                   
+  this is the output from the brief run. what do you think                      
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Good triage structure. Right priorities: chicken is the real emergency, and
+  the INV-099 "received" entry shouldn't be trusted. But the numbers don't
+  survive a check, and the chicken timing is wrong in a way that changes the
+  decision.
+
+  I recomputed daily use from recipes.csv × POS, split weekday vs weekend (15
+  weekdays, 6 weekend days in data):
+
+  Item: Chicken runs out
+  Brief says: Thursday
+  Recomputed: 47.9 lb ÷ 23.7 lb/weekday ≈ 2 days → Tue night / Wed morning
+  Verdict: Wrong. Wed delivery arrives with ~0 margin.
+  ────────────────────────────────────────
+  Item: Chicken order
+  Brief says: "5 cases (about 83 lb)"
+  Recomputed: 5 × 20 lb = 100 lb, not 83. Wed→Mon need ≈ 150 lb (3 wkdays + 2
+  wkend + Mon)
+  Verdict: Wrong. ~8 cases of 20 lb, not 5.
+  ────────────────────────────────────────
+  Item: Eggs, "covers this weekend exactly"
+  Brief says: 84 + 180 = 264
+  Recomputed: Weekend use 88/day. Sat+Sun need 176; 84 + 180 covers it with ~88 
+  spare
+  Verdict: Wrong on "exactly, no spare." Order is fine, just not tight.
+  ────────────────────────────────────────
+  Item: Eggs vs. Saturday 10-10 brunch
+  Brief says: This weekend is covered
+  Recomputed: Same section says Sat 10-10 eggs "come off Monday 10-12's truck"
+  Verdict: Contradiction. 10-10 is before 10-12.
+  ────────────────────────────────────────
+  Item: Cheese "25.2 lb (3 cases of 10 lb)"
+  Brief says: —
+  Recomputed: 3 cases = 30 lb. Need ≈ 33 lb to Mon
+  Verdict: Arithmetic wrong. Order 4 cases.
+  ────────────────────────────────────────
+  Item: Tortillas / beans / rice runout
+  Brief says: Wed / Wed / Fri
+  Recomputed: 280÷127 ≈ 2.2 days; 27.94÷11.1 ≈ 2.5; 42.84÷9 ≈ 4.8
+  Verdict: Roughly right.
+  ────────────────────────────────────────
+  Item: "No invoice for today, so truck may be gone"
+  Brief says: Evidence
+  Recomputed: Data ends 10/4. Missing 10/5 invoice is just the data cutoff
+  Verdict: Overreach. Can't infer the truck state from absence.
+  ────────────────────────────────────────
+  Item: Copper "cutoff on the sheet is blank"
+  Brief says: —
+  Recomputed: vendors.csv has no cutoff column at all
+  Verdict: Says "blank"; it's missing, not blank.
+
+  Other notes:
+  - Typos that matter in an order email: "divery," "cutf," "repe," "lasts until
+    Monday 2" (unclear).
+  - The brief is dated 2026-10-05 and the data ends 10/4. Fine as an as-of
+    snapshot, but it must say so. If it runs today (10/24), every number is
+    three weeks stale.
+  - The brief committed three edits to memory.md in the run. Confirm you want
+    that behavior. It's a side effect a brief run shouldn't have by default.
+
+  Verdict: the decision list is directionally right, but two of the three
+  quantities you'd send to Alder are wrong, and the chicken urgency is
+  understated by a day. I'd not send these numbers as-is.
+
+  Fixes I'd make:
+  - Have the coverage math computed in code (weekday/weekend rates from recipes
+    × POS), not written by the model in prose. Model only narrates the output.
+  - Ban unverified inferences ("truck may be gone") unless backed by a data
+    field. Say "no data after 10/4" instead.
+  - Show the arithmetic inline for each order quantity so mismatches like
+    83-vs-100 get caught.
+
+  Want me to write that coverage script to a file in the repo? It would be a
+  short Python file reading data/, and it would produce the table above.
+
+✻ Crunched for 36s · done 1:07 AM
+
+❯ uv run python main.py chat                                      01:06:37      
+  Ask a question or tell me something new. Ctrl-D to exit.                      
+                                                                                
+  > do you notice any issues with the current data?                             
+  Yes. Four data problems, two of them already corrected in the working copy,   
+  two still open.                                                               
+                                                                                
+  Still wrong, and they distort cost                                            
+                                                                                
+  1. INV-010-L01, peppers, 2026-09-23. The case is entered at $210, ten times   
+  the $21 on every other pepper line, including the delivery two days later     
+  [INV-010-L01, INV-012-L01]. That is $21/lb against a $2.10 median [snapshot:  
+  purchase prices]. The invoice header ($458.40) matches the inflated line, so  
+  this is a line error that was totaled in, not a header/line mismatch. Pepper  
+  stock still balances (unexplained −3 lb) [snapshot: stock reconciliation],    
+  which fits a price typo rather than ten times the product. Do not treat       
+  $21/lb as real. Office should check the paper invoice before anyone           
+  overwrites the line.                                                          
+  2. INV-009, Copper Pantry, 2026-09-21. Header is $395.35; the three entered   
+  lines sum to $347.85; tax and fee are both $0, so $47.50 is unexplained       
+  [INV-009]. Same week's other Copper invoices each include a $42 oil case that 
+  this one does not [INV-003-L0 INV-015-L04], but oil stock balances exactly    
+  to the two oil cases already entered, so do not invent an oil line to close   
+  the gap. $47.50 matches no catalog case price. Ask the office for the paper   
+  invoice. Until then, neither the header nor the lines should be treated as    
+  the true total.                                                               
+                                                                                
+  Already handled, so they don't poison today's numbers                         
+                                                                                
+  3. INV-099 was entered received for a Tuesday 2026-10-06 delivery. Tuesday is 
+  not an Alder day, the cases were not in last night's count, and Maya has not  
+  seen them [N15, COUNT-CLOSE-CHICKEN]. It is marked unconfirmed, so the 40 lb  
+  is not on hand and not inbound [snapshot: memory overrides]. Still confirm    
+  whether it physically shows up tomorrow.                                      
+  4. M99 Weekend special has sales (7, 8, 8, 9 covers over two weekends) and no 
+  recipe [POS-13-M99 to POS-21-M99, menu]. Its ingredient use is missing from   
+  every usage figure. Kitchen never wrote portions [N04, N10]. Until someone    
+  says what went on the plate, usage for those weekends is incomplete.          
+                                                                                
+  Not a data error                                                              
+                                                                                
+  Chicken's move from $3.20/lb to $3.65/lb on Sept 28, and the pack change from 
+  a 40 lb case to a 20 lb case, are real and already mapped [N03, N11].         
+  Alder's day change to Monday/Wednesday is confirmed by later receipts. Eggs   
+  are not on hold [N14].                                                        
+                                                                                
+  What I need from you                                                          
+                                                                                
+  - The paper copy of INV-010 (was the pepper case $21 or $210?) and INV-009    
+  (what is the missing $47.50?).                                                
+  - What actually went into one Weekend special those two weekends.             
+                                                                                
+  I didn't change memory; these were already recorded.                          
+                                                                                
+  [memory changes]                                                              
+    (none)                                                                      
+  here is the output i got from the interactive chat session.                   
+
+⏺ The four items are right in substance. The write-up has three accuracy
+  problems and misses several bigger issues.
+
+  Agree
+  - INV-010 pepper at $210/case. Correct. $210 ÷ 10 lb = $21/lb, against about
+    $2.10/lb on the other lines. The header carries the error.
+  - INV-009 $47.50 gap. Lines sum to $347.85 against a $395.35 header. Reasoning
+    against adding an oil line is sound: oil balances exactly without it, so a
+    missing line would break that balance.
+  - M99 no recipe. Correct. 32 units sold over four weekend days, zero in usage
+    math.
+  - Chicken price and pack change, Alder Mon/Wed. Confirmed by INV-013 (Mon
+    9/28) and INV-016 (Wed 9/30).
+
+  Corrections
+  - "Same week's other Copper invoices" is wrong. INV-003 is 9/14 and INV-015 is
+    9/28. INV-009 is 9/21. The oil-line point still holds, just not as "same
+    week."
+  - "Two already corrected in the working copy" overstates it. Only INV-099 is
+    handled, and only through the memory overlay. The raw invoice_headers.csv
+    still says received. M99 is not corrected at all. It's just flagged.
+  - "Chicken … already mapped" needs checking. The raw data joins on
+    description. AW-CHK20 is "Bnls thigh / skin off 2 x 10lb," and the counts
+    only use "Chicken thigh boneless skinless." When I joined them, bought
+    chicken was 580 lb, theoretical use 519, actual 564. That leaves about 45 lb
+    unexplained (~$165). The answer doesn't mention that gap. If the mapping is
+    already in the working copy, the gap should show up in the stock
+    reconciliation. If it isn't there, the "mapped" claim is wrong.
+
+  Missed
+  - Chicken variance of ~45 lb. The likeliest cause is the unweighed tray tossed
+    9/22 (N06), with no waste record.
+  - Exact-zero variances. Rice, beans, eggs, oil, and avocado match theoretical
+    use to 0.00. That's implausible for hand counts. Ask how the 10/4 closing
+    counts were taken before trusting any variance.
+  - Stale vendor master. vendors.csv still says Alder is Mon/Thu, last reviewed
+    9/14. Vendor-name variants (ALDER WHOLESALE LLC vs Alder Wholesale) are also
+    unhandled.
+  - Data stops 10/4. Today is 10/24. Nothing after 10/4 is in the data, so
+    "current" stock and prices are three weeks old.
+  - Chicken runs out before Wednesday. From the earlier brief check, 47.9 lb
+    lasts about two weekday days. That's the decision-relevant one, and it isn't
+    in this list.
+
+  Two things I need before I can say more:
+  - The paper copies of INV-010 and INV-009, as you asked.
+  - Whether the AW-CHK20 mapping is in the working copy. If it is, I'll check
+    that the 45 lb gap shows up in the reconciliation output.
+
+✻ Baked for 14s · done 1:09 AM
+
+❯ why do you think this issue is happening?                                     
+
+  Listed 1 directory, ran 2 shell commands (ctrl+o to expand)
+
+⏺ I read "this issue" as the recurring data errors, with the chicken gap as the
+  clearest case. I can't see how the source records were entered, so the causes
+  below are inferred from the data and the memory file, not confirmed.
+
+  Likely causes
+
+  1. Nothing checks the numbers at entry. The raw invoice tables don't enforce
+     line_total = quantity × unit_price or header total = sum of lines. INV-010
+     ($210 for a $21 case) and INV-009 (header $47.50 above its lines) both got
+     through. Two of 19 invoices failing those checks points to keying, not one
+     bad source.
+  2. Items are matched by free text, not a SKU master. V1-CHICKEN (40 lb case,
+     "boneless skinless") and AW-CHK20 (20 lb case, "skin off 2 x 10lb") are
+     different SKUs. The counts and recipes use the name "Chicken thigh boneless
+     skinless." The only link is a mapping line in memory.md (map AW-CHK20 -> 
+     Chicken thigh boneless skinless [N03, N11]), based on Maya relaying "same
+     cut" from the kitchen. That's a judgment, not a verified spec. If the
+     mapping is wrong, the stock math is wrong too.
+  3. Usage can't show waste because waste isn't recorded. Usage is computed as
+     recipe × POS. Nothing records waste (no waste table), and the M99 special
+     has no recipe, so its ingredients aren't in the math at all. The 22 Sept
+     tossed chicken tray (N06) is recorded only as prose with no weight.
+  4. The source is a shift notebook, with status set before the goods arrive.
+     INV-099 was marked received for a delivery two days after the entry, and
+     Maya hadn't seen the cases. The N13 → N14 egg-hold reversal shows the notes
+     themselves are sometimes wrong. The memory layer then treats log entries
+     as facts unless someone overrides them.
+  5. The reconciliation can be made to look clean. Once the chicken mapping is
+     applied, I get 580 lb bought, 519 lb theoretical use, and 564 lb actual, so
+     about 45 lb is unexplained. The memory file marks the mapping [x] and
+     doesn't mention that gap. A zero-variance result on rice, beans, eggs, oil,
+     and avocado also looks like counts were filled from expected usage rather
+     than weighed. If so, the "reconciled" items aren't really checks.
+
+  What would settle it
+
+  - Chicken: weigh or count one shelf of AW-CHK20 cases against the 20 lb label,
+    and ask for the spec sheet for both SKUs. That confirms or breaks the
+    mapping, and whether 45 lb is waste or a second product.
+  - Invoices: paper copies for INV-009 and INV-010.
+  - Counts: how the 10/4 closing counts were taken (scale, count sheet, or
+    estimate).
+
+  I also need to correct my earlier "already mapped" check. The mapping does
+  exist, but only in memory.md, not in the raw data, and I haven't verified it.
+  I haven't changed anything.
+
+✻ Churned for 30s · done 1:11 AM
+
+❯ can you help me add up all the cost in backend/data/runs ?                    
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Total across the runs is $2.06 (2.0601), from 124 LLM calls in 19 runs.
+
+  I summed the cost field in each run's usage.jsonl. Every call is xai/grok-4.7,
+  so it's all one model. The other files in the runs (transcript.jsonl,
+  python.jsonl, memory.jsonl) have no cost fields. ops.db has no cost table
+  either.
+
+  I can break this down per run or by run type (brief, chat, log replay) if
+  that's useful. The run IDs suggest the 2026-10-24 runs were mostly replay or
+  testing, so the total may not reflect production spend.
+
+✻ Churned for 8s · done 1:13 AM
+
+❯ what about total inpupt / output?                                             
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Across all 19 runs (124 LLM calls):
+
+  - Input (prompt) tokens: 1,675,611
+  - Output (completion) tokens: 64,360
+  - Total: 1,739,971
+
+  Input is about 96% of tokens. The system prompt is rebuilt every step, and
+  memory loads whole, so that's expected. Cost is $2.06 (earlier figure), which
+  works out to about $1.23 per million input tokens and output included, or
+  roughly what you'd expect at grok-4.7 pricing for the mix.
+
+✻ Cogitated for 7s · done 1:14 AM

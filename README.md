@@ -8,16 +8,12 @@ Requires Python 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 cp backend/.env.example .env      # config reads .env from the repo root
-# set ANTHROPIC_API_KEY (or another litellm provider key + LLM_MODEL)
+
+LLM_MODEL='xai/grok-4.7' # or Any [litellm](https://docs.litellm.ai/docs/providers)
+LLM_REASONING_EFFORT="high" # recommended
+
 cd backend && uv sync
 ```
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `LLM_MODEL` | `xai/grok-4.3-latest` | Any [litellm](https://docs.litellm.ai/docs/providers) model string; `.env.example` uses `anthropic/claude-opus-5-5` |
-| `LLM_REASONING_EFFORT` | `low` | `high` recommended; at `low` the model stops investigating after a few queries |
-| `TRACE` | `1` | Live tool calls and reasoning on stderr; `0` to silence |
-
 ## Run
 
 ```bash
@@ -34,11 +30,17 @@ Outputs:
 
 ## Cost
 
-<!-- TODO: fill from a measured run -->
-On `anthropic/claude-opus-5-5` at high effort, one `brief` run took 8 LLM calls, 139k input / 6.8k output tokens, $0.21. `ingest-log` cost: TODO (15 short turns). Each turn prints its usage.
+Grok: xai/grok-4.7, high reasoning effort:
+
+Log ingestion + one brief run + one interactive chat session:
+- Input (prompt) tokens: 1,675,611
+- Output (completion) tokens: 64,360
+- Total: 1,739,971
+- 19 runs (124 LLM Calls)
+- total cost: $2.06
 
 ## Submission contents
 
 - `ARCHITECTURE.md` — design, memory model, failure modes, evaluation
-- `samples/` — morning brief and representative conversations <!-- TODO -->
+- `samples/` — morning brief and one interactive conversation
 - `transcripts/` — AI coding sessions

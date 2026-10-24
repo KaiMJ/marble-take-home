@@ -1,0 +1,7 @@
+{"model": "xai/grok-4.7", "prompt_tokens": 9311, "completion_tokens": 405, "cost": 0.017788}
+{"model": "xai/grok-4.7", "prompt_tokens": 10839, "completion_tokens": 489, "cost": 0.010788}
+{"model": "xai/grok-4.7", "prompt_tokens": 11687, "completion_tokens": 292, "cost": 0.008998}
+{"model": "xai/grok-4.7", "prompt_tokens": 12879, "completion_tokens": 136, "cost": 0.009102}
+{"model": "xai/grok-4.7", "prompt_tokens": 14050, "completion_tokens": 308, "cost": 0.010748}
+{"model": "xai/grok-4.7", "prompt_tokens": 15666, "completion_tokens": 247, "cost": 0.011886}
+{"model": "xai/grok-4.7", "prompt_tokens": 16821, "completion_tokens": 673, "cost": 0.014256}
