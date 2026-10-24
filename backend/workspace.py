@@ -75,6 +75,10 @@ class Workspace:
             parts.append(f"<stdout>{reply['stdout']}</stdout>")
         if reply["result"] is not None:
             parts.append(f"<result>{reply['result']}</result>")
+        if reply.get("gaps"):
+            parts.append(f"<note>{reply['gaps']}</note>")
+        if reply.get("empty"):
+            parts.append(f"<note>{reply['empty']}</note>")
         if reply["error"]:
             parts.append(f"<error>{reply['error']}</error>")
         text = "\n".join(parts) or "<stdout></stdout>"

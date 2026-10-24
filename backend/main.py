@@ -17,6 +17,8 @@ def cmd_load(reset_memory: bool) -> None:
     if reset_memory and config.MEMORY_DIR.exists():
         shutil.rmtree(config.MEMORY_DIR)
     memory.init()
+    for line in memory.sync_checks("initial load").splitlines():
+        print(line)
     print(f"loaded {config.DB_PATH}; memory at {config.MEMORY_DIR}")
 
 

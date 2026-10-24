@@ -14,6 +14,7 @@ import traceback
 import numpy as np
 import pandas as pd
 
+from checks import find_gaps
 from db import ID_COLUMNS
 
 pd.set_option("display.max_rows", 50)
@@ -54,8 +55,8 @@ ns: dict = {"pd": pd, "np": np, "sql": sql, "find": find, **_load()}
 
 
 def run(code: str, notes_until: str | None) -> dict:
-    # Reload each call: chat notes may have been added. During log replay, hide later notes.
-    ns["notes"] = sql("SELECT * FROM notes")
+    # Reload each call: chat notes and SKU mappings may have changed. During log replay, hide later notes.
+    ns.update(_load())
     if notes_until:
         ns["notes"] = ns["notes"][ns["notes"].written_at <= notes_until].reset_index(drop=True)
     out = io.StringIO()
@@ -69,9 +70,56 @@ def run(code: str, notes_until: str | None) -> dict:
                 value = eval(compile(ast.Expression(last.value), "<agent>", "eval"), ns)
                 if value is not None:
                     result = repr(value)
-    except Exception:
-        error = "".join(traceback.format_exc().splitlines(keepends=True)[-5:])
-    return {"stdout": out.getvalue(), "result": result, "error": error}
+    except Exception as e:
+        # Show only the failing line of the agent's own code, not library internals.
+        frames = [f for f in traceback.extract_tb(e.__traceback__) if f.filename == "<agent>"]
+        where = f"line {frames[-1].lineno}: {code.splitlines()[frames[-1].lineno - 1].strip()}\n" if frames else ""
+        error = f"{where}{type(e).__name__}: {str(e).splitlines()[-1] if str(e) else ''}\n{_hint(e)}"
+    return {"stdout": out.getvalue(), "result": result, "error": error, "empty": _empty_note(result),
+            "gaps": _gap_note(code)}
+
+
+GAP_TABLES = ("purchases", "catalog", "sales", "recipes", "raw_")
+
+
+def _gap_note(code: str) -> str | None:
+    """Warn when the code touches tables that have missing labels, so totals aren't trusted blindly."""
+    if not any(t in code for t in GAP_TABLES):
+        return None
+    with _con() as con:
+        gaps = find_gaps(con)
+    if not gaps:
+        return None
+    lines = "\n".join(f"- {g['summary']}" for g in gaps)
+    return f"Missing labels (see open.md); results using these tables may be incomplete:\n{lines}"
+
+
+TABLES = ", ".join(ID_COLUMNS)
+
+
+def _hint(e: Exception) -> str:
+    """Point the model at the likely fix instead of leaving it to guess."""
+    msg = str(e)
+    if isinstance(e, KeyError):
+        cols = {t: list(ns[t].columns) for t in ID_COLUMNS}
+        owners = [t for t, c in cols.items() if msg.strip("'\"") in c]
+        if owners:
+            return f"Hint: column {msg} exists in: {', '.join(owners)}. Check which DataFrame you indexed."
+        return f"Hint: {msg} is not a column of any preloaded table. Print df.columns to see what exists."
+    if isinstance(e, NameError):
+        return f"Hint: variables from earlier calls persist, but this name was never defined. Tables: {TABLES}."
+    if "no such table" in msg:
+        return f"Hint: available tables: {TABLES}, and raw_* copies of the CSVs."
+    if "no such column" in msg:
+        return "Hint: run sql('SELECT * FROM <table> LIMIT 1') to see the columns."
+    return "Hint: fix the code and run it again; earlier variables are still defined."
+
+
+def _empty_note(result: str | None) -> str | None:
+    if result is not None and result.startswith("Empty DataFrame"):
+        return ("The result has 0 rows. Check your filters before concluding nothing exists: "
+                "comparisons like != '' or == 'x' also drop rows where the column is empty/NULL.")
+    return None
 
 
 for line in sys.stdin:

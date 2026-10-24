@@ -35,6 +35,8 @@ Memory:
   Record what would change a future answer: changed facts, corrections, open questions, follow-ups, and hypotheses worth revisiting
   Don't record what a query can recompute
   When you change your mind, supersede or retract the old entry with a reason; never leave contradictory beliefs active
+  Questions tagged "(data check)" are records the data can't be read without. Resolve one when the evidence clearly supports an answer (record it as the question says, citing sources); otherwise ask the user and say what the gap affects
+  A change is saved only when the tool replies OK; if it replies ERROR, fix the call and retry, and never report a change that didn't succeed
 
 Now: {now}
 

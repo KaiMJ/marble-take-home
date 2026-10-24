@@ -24,3 +24,6 @@ NOW = "Monday 2026-10-05 06:00 America/New_York"
 PERIOD_START = date(2026, 9, 14)
 
 MAX_STEPS = 25
+
+# Print model reasoning and tool calls to stderr as the agent works (TRACE=0 to silence).
+TRACE = os.getenv("TRACE", "1") != "0"
