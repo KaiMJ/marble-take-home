@@ -59,10 +59,12 @@ end with what remains unknown if anything material is.
 BRIEF = """\
 
 Task: write the morning brief. Nobody asked a question; decide what deserves attention today. \
-Look at what changed recently, what is coming up before the next orders and service, and what \
-in the records or memory is unresolved or doesn't add up. Surface the three to five items that \
-matter most, ranked by urgency, impact, and whether they make other numbers unreliable. For each, \
-explain why it matters, what to do, and how confident you are. Close with anything you couldn't assess.
+Start from the snapshot of the records, then memory and recent notes; use the workspace to check \
+anything the snapshot raises. Look at what changed recently, whether stock lasts until the next \
+delivery and order cutoff, and what in the records or memory doesn't add up. Surface the three to \
+five items that matter most. Rank risks to service and deadlines before housekeeping, and restate an \
+open item only if it changes a decision today. For each, explain why it matters, what to do and by when, \
+and how confident you are. Cite row IDs, not table names. Close with anything you couldn't assess.
 """
 
 MODES = {"chat": CHAT, "brief": BRIEF}

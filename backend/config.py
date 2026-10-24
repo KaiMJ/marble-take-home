@@ -22,6 +22,7 @@ RUNS_DIR = VAR_DIR / "runs"
 # Snapshot time from the packet; the agent treats this as "now".
 NOW = "Monday 2026-10-05 06:00 America/New_York"
 PERIOD_START = date(2026, 9, 14)
+PERIOD_END = date(2026, 10, 4)
 
 MAX_STEPS = 25
 

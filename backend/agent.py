@@ -34,6 +34,10 @@ def _trace(text: str, color: str = "", max_lines: int = 30) -> None:
     print(color + "\n".join(lines) + RESET, file=sys.stderr, flush=True)
 
 
+TABLE_CITATION = re.compile(
+    r"\[(?:sales|purchases|invoices|counts|recipes|menu|vendors|catalog|notes)(?:[ ,][^\[\]]*)?\]", re.I)
+
+
 def _is_error(out: str) -> bool:
     return out.startswith("ERROR") or "<error>" in out
 
@@ -74,7 +78,7 @@ class Agent:
             out = memory.run(args)
             self._log("memory", {"args": args, "output": out})
             if out.startswith("OK "):
-                self.memory_changes.append(f"{out.splitlines()[0]}: {args.get('reason', '')}")
+                self.memory_changes.append(f"{out.splitlines()[0]}: {memory._reason(args) or ''}")
             return out
         return f"ERROR: unknown tool {name!r}.\nFix: use python or memory."
 
@@ -127,12 +131,11 @@ class Agent:
         self.messages.append({"role": "user", "content": user_text})
         self._log("transcript", self.messages[-1])
         answer = self._complete()
-        unknown = sorted(set(ID_PATTERN.findall(answer)) - db.known_ids())
-        if unknown:
-            _trace(f"citation check failed: {', '.join(unknown)}", RED)
+        problems = _citation_problems(answer)
+        if problems:
+            _trace(f"citation check failed: {problems}", RED)
             self.messages.append({"role": "user", "content": (
-                f"[citation check] These IDs don't exist in the records: {', '.join(unknown)}. "
-                "Correct or remove them and give the full answer again."
+                f"[citation check] {problems} Fix the citations and give the full answer again."
             )})
             answer = self._complete()
         changes = "\n".join(f"  - {c}" for c in self.memory_changes) or "  (none)"
@@ -142,12 +145,24 @@ class Agent:
         self.workspace.close()
 
 
+def _citation_problems(answer: str) -> str:
+    problems = []
+    unknown = sorted(set(ID_PATTERN.findall(answer)) - db.known_ids())
+    if unknown:
+        problems.append(f"These IDs don't exist in the records: {', '.join(unknown)}.")
+    tables = sorted(set(TABLE_CITATION.findall(answer)))
+    if tables:
+        problems.append(f"These cite a table, not a record: {', '.join(tables)}. Cite the row IDs "
+                        "(e.g. POS-21-M05, INV-011-L02, COUNT-CLOSE-EGG).")
+    return " ".join(problems)
+
+
 def _trace_call(name: str, args: dict) -> None:
     if name == "python":
         _trace("▶ python\n" + "\n".join("    " + ln for ln in args.get("code", "").splitlines()), CYAN)
     elif name == "memory":
         target = args.get("path") or args.get("query") or ""
-        reason = f"  — {args['reason']}" if args.get("reason") else ""
+        reason = f"  — {memory._reason(args)}" if memory._reason(args) else ""
         _trace(f"▶ memory {args.get('command')} {target}{reason}", CYAN)
         if args.get("command") == "edit":
             _trace(f"    - {args.get('old', '')}\n    + {args.get('new', '')}", CYAN, max_lines=10)

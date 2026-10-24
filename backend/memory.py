@@ -1,6 +1,7 @@
 """`memory` tool: markdown files under /memories, versioned with git (one commit per write)."""
 
 import difflib
+import re
 import subprocess
 from pathlib import Path
 
@@ -50,11 +51,15 @@ SCHEMA = {
             "Commands: view (a file, or a directory to list files with summaries; as_of reads a past version), "
             "search (words or an ID), write (create or replace a whole file; empty content deletes), "
             "edit (replace one exact snippet; view the file first to copy text exactly). "
-            "write and edit require a reason that cites source IDs.\n"
+            "write and edit need a reason; if omitted, the source IDs cited in brackets in the new text are used.\n"
             "Layout: open.md (## Questions, ## Todos, ## Hypotheses), vendors.md, ingredients.md, menu.md, "
             "operations.md, data.md (## Mappings, ## Corrections, ## Known issues). Add entries under the "
             "matching file and heading; create a new file only for a topic none of these fits. "
             "Keep line 2 as 'summary: <one line>'.\n"
+            "Record what is true now, not a diary: notes are already stored and searchable, so don't copy them; "
+            "record what a note changes. Give each fact one home and update it in place when it changes. "
+            "Any follow-up ('need to', 'keep checking', 'not yet seen') becomes a todo or question in open.md; "
+            "a possible explanation becomes a hypothesis.\n"
             "Entry format: '- <statement> from <date> [<source IDs>] (reported|observed|inferred)'. "
             "Changed belief: '- ~~<old>~~ -> <new> [<source IDs>]'. "
             "Hypothesis: '- (low|med|high) <claim> [<IDs>]. Confirm by: <what would settle it>'. "
@@ -70,7 +75,7 @@ SCHEMA = {
                 "new": {"type": "string", "description": "edit: replacement text"},
                 "query": {"type": "string", "description": "search: words or an ID"},
                 "as_of": {"type": "string", "description": "view: ISO datetime; read the version at that time"},
-                "reason": {"type": "string", "description": "write/edit (required): why, with source IDs"},
+                "reason": {"type": "string", "description": "write/edit: why, with source IDs (defaults to the IDs cited in the new text)"},
             },
             "required": ["command"],
         },
@@ -208,8 +213,16 @@ def edit(path: str, old: str, new: str, reason: str) -> str:
     return f"OK edited {path} (commit {sha})\n{diff}"
 
 
-REQUIRED = {"view": ["path"], "search": ["query"], "write": ["path", "content", "reason"],
-            "edit": ["path", "old", "new", "reason"]}
+REQUIRED = {"view": ["path"], "search": ["query"], "write": ["path", "content"], "edit": ["path", "old", "new"]}
+CITATION = re.compile(r"\[([^\[\]]+)\]")
+
+
+def _reason(args: dict) -> str | None:
+    """The given reason, or else the sources cited in the new text (e.g. '[N03, INV-013-L01]')."""
+    if args.get("reason"):
+        return args["reason"]
+    cited = CITATION.findall(args.get("new") or args.get("content") or "")
+    return f"sources: {', '.join(cited)}" if cited else None
 
 
 def sync_checks(reason: str) -> str:
@@ -226,10 +239,15 @@ def run(args: dict) -> str:
     cmd = args.get("command")
     if cmd not in REQUIRED:
         return f"ERROR: unknown command {cmd!r}.\nFix: use one of view, search, write, edit."
-    missing = [k for k in REQUIRED[cmd] if args.get(k) is None or (k == "reason" and not args.get(k))]
+    missing = [k for k in REQUIRED[cmd] if args.get(k) is None]
     if missing:
         saving = "\nNothing was saved." if cmd in ("write", "edit") else ""
         return f"ERROR: {cmd} is missing {', '.join(missing)}.{saving}\nFix: call again with {', '.join(missing)}."
+    if cmd in ("write", "edit"):
+        args = {**args, "reason": _reason(args)}
+        if not args["reason"]:
+            return (f"ERROR: {cmd} has no reason and the new text cites no sources.\nNothing was saved.\n"
+                    "Fix: add a reason, or cite source IDs in brackets in the text, e.g. [N03, INV-013-L01].")
     try:
         if cmd == "view":
             return view(args["path"], args.get("as_of"))

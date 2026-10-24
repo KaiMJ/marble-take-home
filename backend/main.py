@@ -7,6 +7,7 @@ import sqlite3
 import config
 import db
 import memory
+import snapshot
 from agent import Agent
 
 NOW_ISO = "2026-10-05 06:00"
@@ -59,7 +60,12 @@ def cmd_brief() -> None:
         ).fetchall()
     notes = "\n".join(f"[{n} | {w} | {a}] {t}" for n, w, a, t in recent)
     agent = Agent("brief")
-    brief = agent.turn(f"Write this morning's brief.\n\nNotes from the past week:\n{notes}")
+    brief = agent.turn(
+        "Write this morning's brief.\n\n"
+        f"<snapshot>\nFixed queries over the records, computed before you started. Facts, not conclusions.\n\n"
+        f"{snapshot.build()}\n</snapshot>\n\n"
+        f"Notes from the past week:\n{notes}"
+    )
     agent.close()
     memory.write("/memories/briefs/2026-10-05.md",
                  f"# Brief 2026-10-05\nsummary: morning brief for {config.NOW}\n\n{brief}",
